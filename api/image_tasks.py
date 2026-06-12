@@ -6,14 +6,18 @@ from pydantic import BaseModel, Field
 
 from api.support import (
     apply_image_account_policy,
+    client_ip_from_request,
     consume_user_quota,
+    image_quota_cost_for_payload,
     refund_user_quota,
     require_identity,
     resolve_image_base_url,
 )
+from services.config import config
 from services.content_filter import check_request
 from services.image_task_service import image_task_service
 from services.log_service import LoggedCall
+from services.rate_limit_service import RateLimitExceeded, rate_limit_service
 
 
 class ImageGenerationTaskRequest(BaseModel):
@@ -38,6 +42,19 @@ async def filter_or_log(call: LoggedCall, text: str) -> None:
     except HTTPException as exc:
         call.log("调用失败", status="failed", error=str(exc.detail))
         raise
+
+
+def _enforce_image_ip_limit(identity: dict[str, object], request: Request) -> None:
+    if str(identity.get("role") or "").strip().lower() == "admin":
+        return
+    try:
+        rate_limit_service.check_image(
+            client_ip_from_request(request),
+            limit=config.image_ip_minute_limit,
+            window_seconds=60,
+        )
+    except RateLimitExceeded as exc:
+        raise HTTPException(status_code=429, detail={"error": str(exc)}) from exc
 
 
 def create_router() -> APIRouter:
@@ -69,10 +86,12 @@ def create_router() -> APIRouter:
         identity = require_identity(authorization)
         payload: dict[str, object] = {"model": body.model, "resolution": body.resolution}
         apply_image_account_policy(identity, payload)
-        # 前端每张图独立提交一次任务，按 1 扣；额度不足直接 402，
+        _enforce_image_ip_limit(identity, request)
+        # 前端每张图独立提交一次任务，按分辨率倍率扣；额度不足直接 402，
         # 不要等 submit_generation 跑完才发现没额度。
-        consume_user_quota(identity, 1)
-        # 后续任意 fail-fast 路径都要把这 1 张退掉，避免参数错误也白扣
+        quota_cost = image_quota_cost_for_payload(payload)
+        consume_user_quota(identity, quota_cost)
+        # 后续任意 fail-fast 路径都要把预扣额度退掉，避免参数错误也白扣
         try:
             await filter_or_log(LoggedCall(identity, "/api/image-tasks/generations", body.model, "文生图任务", request_text=body.prompt), body.prompt)
             return await run_in_threadpool(
@@ -86,15 +105,16 @@ def create_router() -> APIRouter:
                 plan_type=str(payload.get("plan_type") or "").strip() or None,
                 allowed_plan_types=payload.get("allowed_plan_types"),
                 base_url=resolve_image_base_url(request),
+                quota_cost=quota_cost,
             )
         except ValueError as exc:
-            refund_user_quota(identity, 1)
+            refund_user_quota(identity, quota_cost)
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
         except HTTPException:
             # filter_or_log / submit_generation 抛出的 HTTPException：
             # 内容审查 / 上游号池忙 / 参数错都属于"还没真发请求就失败"，应退款。
             # _run_task 异步路径的失败由 image_task_service._refund_one 自己退，不在这条链路里。
-            refund_user_quota(identity, 1)
+            refund_user_quota(identity, quota_cost)
             raise
 
     @router.post("/api/image-tasks/edits")
@@ -112,8 +132,10 @@ def create_router() -> APIRouter:
         identity = require_identity(authorization)
         payload: dict[str, object] = {"model": model, "resolution": resolution}
         apply_image_account_policy(identity, payload)
-        # 同样按 1 张扣；前端会拆成多次提交，所以这里不需要乘以 n。
-        consume_user_quota(identity, 1)
+        _enforce_image_ip_limit(identity, request)
+        # 同样按分辨率倍率扣；前端会拆成多次提交，所以这里不需要乘以 n。
+        quota_cost = image_quota_cost_for_payload(payload)
+        consume_user_quota(identity, quota_cost)
         try:
             await filter_or_log(LoggedCall(identity, "/api/image-tasks/edits", model, "图生图任务", request_text=prompt), prompt)
             uploads = [*(image or []), *(image_list or [])]
@@ -137,12 +159,13 @@ def create_router() -> APIRouter:
                 allowed_plan_types=payload.get("allowed_plan_types"),
                 base_url=resolve_image_base_url(request),
                 images=images,
+                quota_cost=quota_cost,
             )
         except ValueError as exc:
-            refund_user_quota(identity, 1)
+            refund_user_quota(identity, quota_cost)
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
         except HTTPException:
-            refund_user_quota(identity, 1)
+            refund_user_quota(identity, quota_cost)
             raise
 
     return router

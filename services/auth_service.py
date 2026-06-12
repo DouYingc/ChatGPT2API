@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import secrets
 import uuid
 from datetime import date, datetime, timezone
 from threading import Lock
 from typing import Literal
 
-from services.config import config
+from services.config import DATA_DIR, config
 from services.storage.base import StorageBackend
 
 AuthRole = Literal["admin", "user"]
@@ -32,6 +33,27 @@ _PERIODIC_KINDS: tuple[QuotaKind, ...] = (
     "chat_daily",
     "chat_monthly",
 )
+_PASSWORD_ALGORITHM = "pbkdf2_sha256"
+_PASSWORD_ITERATIONS = 260_000
+_USERNAME_ALLOWED_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-@")
+DEFAULT_REGISTER_QUOTAS = {
+    "image_daily_quota": 0,
+    "image_daily_unlimited": True,
+    "image_monthly_quota": 0,
+    "image_monthly_unlimited": True,
+    "image_total_quota": 100,
+    "image_total_unlimited": False,
+    "chat_daily_quota": 0,
+    "chat_daily_unlimited": True,
+    "chat_monthly_quota": 0,
+    "chat_monthly_unlimited": True,
+    "chat_total_quota": 0,
+    "chat_total_unlimited": True,
+}
+
+
+class AuthAccountDisabledError(ValueError):
+    pass
 
 
 def _now_iso() -> str:
@@ -40,6 +62,34 @@ def _now_iso() -> str:
 
 def _hash_key(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _hash_password(value: str) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        value.encode("utf-8"),
+        salt.encode("ascii"),
+        _PASSWORD_ITERATIONS,
+    ).hex()
+    return f"{_PASSWORD_ALGORITHM}${_PASSWORD_ITERATIONS}${salt}${digest}"
+
+
+def _verify_password(value: str, encoded: str) -> bool:
+    try:
+        algorithm, iterations_raw, salt, digest = str(encoded or "").split("$", 3)
+        iterations = int(iterations_raw)
+    except (TypeError, ValueError):
+        return False
+    if algorithm != _PASSWORD_ALGORITHM or iterations <= 0 or not salt or not digest:
+        return False
+    candidate = hashlib.pbkdf2_hmac(
+        "sha256",
+        value.encode("utf-8"),
+        salt.encode("ascii"),
+        iterations,
+    ).hex()
+    return hmac.compare_digest(candidate, digest)
 
 
 def _today_key() -> str:
@@ -90,6 +140,26 @@ class AuthService:
         return bool(value)
 
     @classmethod
+    def _has_redeemed_code(cls, user_id: object) -> bool:
+        normalized_id = cls._clean(user_id)
+        if not normalized_id:
+            return False
+        path = DATA_DIR / "redeem_codes.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        items = data.get("items") if isinstance(data, dict) else data
+        if not isinstance(items, list):
+            return False
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if cls._clean(item.get("used_by")) == normalized_id and cls._clean(item.get("used_at")):
+                return True
+        return False
+
+    @classmethod
     def _normalize_account_tier(cls, value: object, *, role: object = "user") -> AccountTier:
         if str(role or "").strip().lower() == "admin":
             return "premium"
@@ -104,6 +174,11 @@ class AuthService:
         role = cls._clean(item.get("role")).lower()
         return role == "admin" or cls._normalize_account_tier(item.get("account_tier"), role=role) == "premium"
 
+    @classmethod
+    def _can_use_high_resolution(cls, item: dict[str, object]) -> bool:
+        role = cls._clean(item.get("role")).lower()
+        return role == "admin" or cls._can_use_paid_image_accounts(item) or bool(item.get("high_resolution_enabled"))
+
     def _normalize_item(self, raw: object) -> dict[str, object] | None:
         if not isinstance(raw, dict):
             return None
@@ -115,6 +190,8 @@ class AuthService:
             return None
         item_id = self._clean(raw.get("id")) or uuid.uuid4().hex[:12]
         name = self._clean(raw.get("name")) or self._default_name(role)
+        username = self._clean(raw.get("username")) if role == "user" else ""
+        password_hash = self._clean(raw.get("password_hash")) if role == "user" else ""
         created_at = self._clean(raw.get("created_at")) or _now_iso()
         last_used_at = self._clean(raw.get("last_used_at")) or None
         # 仅 user 角色保留明文，给 admin 后台"查看 / 复制密钥"用；admin 角色靠 config.auth_key 鉴权，
@@ -124,6 +201,14 @@ class AuthService:
             raw.get("account_tier", raw.get("image_account_tier")),
             role=role,
         )
+        if role == "user":
+            high_resolution_enabled = (
+                self._coerce_bool(raw.get("high_resolution_enabled"), False)
+                if "high_resolution_enabled" in raw
+                else self._has_redeemed_code(item_id)
+            )
+        else:
+            high_resolution_enabled = True
 
         # 画图三档迁移规则：
         #   - 已经有 image_total_quota 字段：当前格式，原样读取。
@@ -189,14 +274,18 @@ class AuthService:
             chat_daily_unlimited = True
             chat_monthly_unlimited = True
             chat_total_unlimited = True
+            high_resolution_enabled = True
 
         return {
             "id": item_id,
             "name": name,
+            "username": username,
+            "password_hash": password_hash,
             "role": role,
             "key_hash": key_hash,
             "key": key_plain,
             "account_tier": account_tier,
+            "high_resolution_enabled": high_resolution_enabled,
             "enabled": bool(raw.get("enabled", True)),
             "created_at": created_at,
             "last_used_at": last_used_at,
@@ -265,13 +354,15 @@ class AuthService:
         result: dict[str, object] = {
             "id": item.get("id"),
             "name": item.get("name"),
+            "username": item.get("username") or "",
+            "has_password": bool(cls._clean(item.get("password_hash"))),
             "role": item.get("role"),
             "enabled": bool(item.get("enabled", True)),
             "created_at": item.get("created_at"),
             "last_used_at": item.get("last_used_at"),
             "account_tier": cls._normalize_account_tier(item.get("account_tier"), role=item.get("role")),
             "can_use_paid_image_accounts": cls._can_use_paid_image_accounts(item),
-            "can_use_high_resolution": cls._can_use_paid_image_accounts(item),
+            "can_use_high_resolution": cls._can_use_high_resolution(item),
             # 仅暴露"是否可被 admin 回显"，原文要走专门的 get_raw_key 单独取。
             "key_visible": bool(item.get("role") == "user" and cls._clean(item.get("key"))),
         }
@@ -284,6 +375,33 @@ class AuthService:
             result[f"{kind}_unlimited"] = unlimited
             result[f"{kind}_remaining"] = cls._remaining(quota, used, unlimited)
         return result
+
+    @staticmethod
+    def _record_quota_ledger(
+        item: dict[str, object],
+        *,
+        kind: str,
+        action: str,
+        amount: int,
+        source: str,
+        note: str = "",
+        remaining: dict[str, object] | None = None,
+    ) -> None:
+        try:
+            from services.quota_ledger_service import quota_ledger_service
+            quota_ledger_service.record(
+                user_id=str(item.get("id") or ""),
+                user_name=str(item.get("name") or item.get("username") or ""),
+                role=str(item.get("role") or "user"),
+                kind=kind,
+                action=action,
+                amount=amount,
+                source=source,
+                note=note,
+                remaining=remaining or {},
+            )
+        except Exception:
+            pass
 
     def list_keys(self, role: AuthRole | None = None) -> list[dict[str, object]]:
         with self._lock:
@@ -338,6 +456,52 @@ class AuthService:
             if self._clean(item.get("name")) == candidate:
                 return True
         return False
+
+    @classmethod
+    def _normalize_username_value(cls, username: str) -> str:
+        return cls._clean(username).lower()
+
+    @classmethod
+    def _validate_username(cls, username: str, *, required: bool = False) -> str:
+        candidate = cls._clean(username)
+        if not candidate:
+            if required:
+                raise ValueError("请输入用户名")
+            return ""
+        if len(candidate) < 3 or len(candidate) > 64:
+            raise ValueError("用户名长度需要在 3 到 64 个字符之间")
+        if any(ch not in _USERNAME_ALLOWED_CHARS for ch in candidate):
+            raise ValueError("用户名只能包含字母、数字、点、下划线、短横线和 @")
+        return candidate
+
+    @classmethod
+    def _validate_password(cls, password: str) -> str:
+        candidate = str(password or "")
+        if len(candidate) < 6:
+            raise ValueError("密码至少需要 6 个字符")
+        if len(candidate) > 128:
+            raise ValueError("密码不能超过 128 个字符")
+        return candidate
+
+    def _has_username_locked(self, username: str, *, exclude_id: str = "") -> bool:
+        candidate = self._normalize_username_value(username)
+        if not candidate:
+            return False
+        for item in self._items:
+            item_id = self._clean(item.get("id"))
+            if exclude_id and item_id == exclude_id:
+                continue
+            if self._normalize_username_value(str(item.get("username") or "")) == candidate:
+                return True
+        return False
+
+    def _build_username_locked(self, username: str, *, exclude_id: str = "", required: bool = False) -> str:
+        candidate = self._validate_username(username, required=required)
+        if not candidate:
+            return ""
+        if self._has_username_locked(candidate, exclude_id=exclude_id):
+            raise ValueError("这个用户名已经被注册了，请换一个")
+        return candidate
 
     def _build_default_name_locked(self, role: AuthRole, *, exclude_id: str = "") -> str:
         base_name = self._default_name(role)
@@ -407,10 +571,18 @@ class AuthService:
         chat_total_quota: int = 0,
         chat_total_unlimited: bool = True,
         account_tier: AccountTier | str = "free",
+        username: str = "",
+        password: str = "",
     ) -> tuple[dict[str, object], str]:
         with self._lock:
             self._reload_locked()
             normalized_name = self._build_name_locked(name, role=role)
+            normalized_username = self._build_username_locked(username) if role == "user" else ""
+            password_hash = ""
+            if password:
+                if not normalized_username:
+                    raise ValueError("设置密码前需要先填写用户名")
+                password_hash = _hash_password(self._validate_password(password))
             custom_key = self._clean(key)
             if custom_key:
                 # 自定义密钥走和"编辑里换 key"同一套校验：非空、不与管理员密钥冲突、不与其他用户重复。
@@ -428,11 +600,14 @@ class AuthService:
             item = {
                 "id": uuid.uuid4().hex[:12],
                 "name": normalized_name,
+                "username": normalized_username,
+                "password_hash": password_hash,
                 "role": role,
                 "key_hash": key_hash,
                 # admin 不落明文：admin 鉴权走 config.auth_key，不通过 auth_keys.json。
                 "key": "" if is_admin else raw_key,
                 "account_tier": self._normalize_account_tier(account_tier, role=role),
+                "high_resolution_enabled": True if is_admin else False,
                 "enabled": True,
                 "created_at": _now_iso(),
                 "last_used_at": None,
@@ -490,6 +665,19 @@ class AuthService:
                         role=next_role,
                         exclude_id=normalized_id,
                     )
+                if "username" in updates and updates.get("username") is not None:
+                    next_username = self._build_username_locked(
+                        str(updates.get("username") or ""),
+                        exclude_id=normalized_id,
+                    )
+                    next_item["username"] = next_username
+                    if not next_username:
+                        next_item["password_hash"] = ""
+                if "password" in updates and updates.get("password") is not None:
+                    password = self._validate_password(str(updates.get("password") or ""))
+                    if not self._clean(next_item.get("username")):
+                        raise ValueError("设置密码前需要先填写用户名")
+                    next_item["password_hash"] = _hash_password(password)
                 if "enabled" in updates and updates.get("enabled") is not None:
                     next_item["enabled"] = bool(updates.get("enabled"))
                 if "key" in updates and updates.get("key") is not None:
@@ -568,6 +756,32 @@ class AuthService:
                 return self._public_item(next_item)
         return None
 
+    def add_image_total_quota(self, key_id: str, amount: int) -> dict[str, object]:
+        normalized_id = self._clean(key_id)
+        delta = self._coerce_int(amount, 0)
+        if not normalized_id:
+            raise ValueError("用户不存在")
+        if delta <= 0:
+            raise ValueError("兑换额度必须大于 0")
+        with self._lock:
+            self._reload_locked()
+            for index, item in enumerate(self._items):
+                if item.get("id") != normalized_id:
+                    continue
+                if str(item.get("role") or "").strip().lower() != "user":
+                    raise ValueError("只有普通用户可以兑换额度")
+                if not bool(item.get("enabled", True)):
+                    raise ValueError("该账号已被禁用，请联系管理员")
+                if bool(item.get("image_total_unlimited", False)):
+                    raise ValueError("当前账号画图总额度不限，无需兑换")
+                next_item = dict(item)
+                next_item["image_total_quota"] = self._coerce_int(next_item.get("image_total_quota"), 0) + delta
+                next_item["high_resolution_enabled"] = True
+                self._items[index] = next_item
+                self._save()
+                return self._public_item(next_item)
+        raise ValueError("用户不存在")
+
     def _consume_kinds_locked(
         self,
         key_id: str,
@@ -620,6 +834,16 @@ class AuthService:
             except Exception:
                 self._items[index] = item
                 raise
+            ledger_kind = "image" if kinds == _IMAGE_KINDS else "chat"
+            self._record_quota_ledger(
+                next_item,
+                kind=ledger_kind,
+                action=f"{ledger_kind}_consume",
+                amount=-delta,
+                source="生图扣费" if ledger_kind == "image" else "对话扣费",
+                note=f"扣除 {delta} 额度",
+                remaining=_remaining_snapshot(next_item, kinds),
+            )
             return {
                 "ok": True,
                 "unlimited": False,
@@ -662,6 +886,16 @@ class AuthService:
             except Exception:
                 self._items[index] = item
                 raise
+            ledger_kind = "image" if kinds == _IMAGE_KINDS else "chat"
+            self._record_quota_ledger(
+                next_item,
+                kind=ledger_kind,
+                action=f"{ledger_kind}_refund",
+                amount=delta,
+                source="失败返还" if ledger_kind == "image" else "对话返还",
+                note=f"返还 {delta} 额度",
+                remaining=_remaining_snapshot(next_item, kinds),
+            )
             return {
                 "ok": True,
                 "unlimited": False,
@@ -750,6 +984,82 @@ class AuthService:
                 next_item["key"] = raw_key
                 self._items[index] = next_item
                 self._save()
+                return self._public_item(next_item), raw_key
+        return None
+
+    def register_user(self, *, username: str, password: str) -> tuple[dict[str, object], str]:
+        normalized_username = self._validate_username(username, required=True)
+        normalized_password = self._validate_password(password)
+        register_defaults = dict(DEFAULT_REGISTER_QUOTAS)
+        register_defaults.update(config.register_defaults)
+        return self.create_key(
+            role="user",
+            name=normalized_username,
+            username=normalized_username,
+            password=normalized_password,
+            account_tier="free",
+            **register_defaults,
+        )
+
+    def change_password(self, key_id: str, current_password: str, new_password: str) -> dict[str, object] | None:
+        normalized_id = self._clean(key_id)
+        if not normalized_id:
+            return None
+        current_candidate = str(current_password or "")
+        next_candidate = self._validate_password(new_password)
+        with self._lock:
+            self._reload_locked()
+            for index, item in enumerate(self._items):
+                if item.get("id") != normalized_id:
+                    continue
+                if str(item.get("role") or "").strip().lower() != "user":
+                    raise ValueError("只有普通用户账号可以修改密码")
+                if not bool(item.get("enabled", True)):
+                    raise AuthAccountDisabledError("该账号已被禁用，请联系管理员")
+                password_hash = self._clean(item.get("password_hash"))
+                if not password_hash:
+                    raise ValueError("当前账号暂未设置密码，请联系管理员重置密码")
+                if not current_candidate or not _verify_password(current_candidate, password_hash):
+                    raise ValueError("当前密码不正确")
+                if _verify_password(next_candidate, password_hash):
+                    raise ValueError("新密码不能和当前密码相同")
+                next_item = dict(item)
+                next_item["password_hash"] = _hash_password(next_candidate)
+                self._items[index] = next_item
+                self._save()
+                return self._public_item(next_item)
+        return None
+
+    def authenticate_password(self, username: str, password: str) -> tuple[dict[str, object], str] | None:
+        normalized_username = self._normalize_username_value(username)
+        candidate_password = str(password or "")
+        if not normalized_username or not candidate_password:
+            return None
+        with self._lock:
+            self._reload_locked()
+            for index, item in enumerate(self._items):
+                if str(item.get("role") or "").strip().lower() != "user":
+                    continue
+                stored_username = self._normalize_username_value(str(item.get("username") or ""))
+                if stored_username != normalized_username:
+                    continue
+                if not bool(item.get("enabled", True)):
+                    raise AuthAccountDisabledError("该账号已被禁用，请联系管理员")
+                password_hash = self._clean(item.get("password_hash"))
+                if not password_hash or not _verify_password(candidate_password, password_hash):
+                    return None
+                raw_key = self._clean(item.get("key"))
+                if not raw_key:
+                    raise ValueError("该账号缺少可用于登录的用户密钥，请联系管理员重置密钥")
+                next_item = dict(item)
+                now = datetime.now(timezone.utc)
+                next_item["last_used_at"] = now.isoformat()
+                self._items[index] = next_item
+                try:
+                    self._save()
+                    self._last_used_flush_at[self._clean(next_item.get("id"))] = now
+                except Exception:
+                    pass
                 return self._public_item(next_item), raw_key
         return None
 

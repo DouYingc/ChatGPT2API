@@ -7,8 +7,8 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
-from api.support import can_use_paid_image_accounts, require_admin, require_identity, resolve_image_base_url
-from services.auth_service import auth_service
+from api.support import can_use_high_resolution, can_use_paid_image_accounts, client_ip_from_request, require_admin, require_identity, resolve_image_base_url
+from services.auth_service import AuthAccountDisabledError, auth_service
 from services.backup_service import BackupError, backup_service
 from services.config import config
 from services.image_owners_service import get_owner, owner_counts
@@ -16,6 +16,8 @@ from services.image_service import count_total_images, delete_images, download_i
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
 from services.log_service import log_service
 from services.proxy_service import test_proxy
+from services.quota_ledger_service import quota_ledger_service
+from services.rate_limit_service import RateLimitExceeded, rate_limit_service
 
 
 def _admin_owner_ids() -> set[str]:
@@ -60,22 +62,76 @@ class BackupDeleteRequest(BaseModel):
     key: str = ""
 
 
+class PasswordAuthRequest(BaseModel):
+    username: str = ""
+    password: str = ""
+
+
+def _login_payload(identity: dict[str, object], app_version: str, *, key: str | None = None) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "ok": True,
+        "version": app_version,
+        "role": identity.get("role"),
+        "subject_id": identity.get("id"),
+        "name": identity.get("name"),
+        "account_tier": "premium" if can_use_paid_image_accounts(identity) else "free",
+        "can_use_paid_image_accounts": can_use_paid_image_accounts(identity),
+        "can_use_high_resolution": can_use_high_resolution(identity),
+    }
+    if key is not None:
+        payload["key"] = key
+    return payload
+
+
 def create_router(app_version: str) -> APIRouter:
     router = APIRouter()
 
     @router.post("/auth/login")
     async def login(authorization: str | None = Header(default=None)):
         identity = require_identity(authorization)
-        return {
-            "ok": True,
-            "version": app_version,
-            "role": identity.get("role"),
-            "subject_id": identity.get("id"),
-            "name": identity.get("name"),
-            "account_tier": "premium" if can_use_paid_image_accounts(identity) else "free",
-            "can_use_paid_image_accounts": can_use_paid_image_accounts(identity),
-            "can_use_high_resolution": can_use_paid_image_accounts(identity),
-        }
+        return _login_payload(identity, app_version)
+
+    @router.post("/auth/password/login")
+    async def password_login(body: PasswordAuthRequest):
+        try:
+            result = auth_service.authenticate_password(body.username, body.password)
+        except AuthAccountDisabledError as exc:
+            raise HTTPException(status_code=403, detail={"error": str(exc)}) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        if result is None:
+            raise HTTPException(status_code=401, detail={"error": "用户名或密码错误"})
+        identity, raw_key = result
+        return _login_payload(identity, app_version, key=raw_key)
+
+    @router.post("/auth/register")
+    async def register_user(body: PasswordAuthRequest, request: Request):
+        try:
+            rate_limit_service.check_register(client_ip_from_request(request), limit=config.register_ip_daily_limit)
+        except RateLimitExceeded as exc:
+            raise HTTPException(status_code=429, detail={"error": str(exc)}) from exc
+        try:
+            identity, raw_key = auth_service.register_user(username=body.username, password=body.password)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        register_quota = int(identity.get("image_total_quota") or 0)
+        if register_quota > 0 and not bool(identity.get("image_total_unlimited")):
+            quota_ledger_service.record(
+                user_id=str(identity.get("id") or ""),
+                user_name=str(identity.get("name") or ""),
+                role="user",
+                kind="image",
+                action="register_grant",
+                amount=register_quota,
+                source="注册赠送",
+                note=f"新用户默认画图额度 +{register_quota}",
+                remaining={
+                    "image_total": identity.get("image_total_remaining"),
+                    "image_daily": identity.get("image_daily_remaining"),
+                    "image_monthly": identity.get("image_monthly_remaining"),
+                },
+            )
+        return _login_payload(identity, app_version, key=raw_key)
 
     @router.get("/version")
     async def get_version():

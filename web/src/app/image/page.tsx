@@ -26,7 +26,9 @@ import {
   publishGalleryItem,
   type ImageTask,
 } from "@/lib/api";
+import { QUOTA_SHOP_URL } from "@/lib/billing";
 import { useAuthGuard } from "@/lib/use-auth-guard";
+import type { StoredAuthSession } from "@/store/auth";
 import {
   clearImageConversations,
   deleteImageConversation,
@@ -52,12 +54,40 @@ const HIGH_RESOLUTION_VALUES = new Set(["2k", "4k"]);
 // 关浏览器后从底部重看更自然；要跨浏览器会话保留改成 localStorage 即可。
 const SCROLL_POSITION_STORAGE_KEY = "chatgpt2api:image_scroll_positions";
 
+function storageKeyPart(value: string) {
+  return value.replace(/[^a-zA-Z0-9._:-]/g, "_") || "unknown";
+}
+
+function imageStorageScope(session: StoredAuthSession) {
+  return [storageKeyPart(session.role), storageKeyPart(session.subjectId || session.name || "unknown")].join(":");
+}
+
+function scopedImageStorageKey(base: string, scope: string) {
+  return `${base}:${scope}`;
+}
+
 function clampImageCount(value: string) {
   return String(Math.min(100, Math.max(1, Math.floor(Number(value) || 1))));
 }
 
 function isHighResolution(value: string | null | undefined) {
   return HIGH_RESOLUTION_VALUES.has(String(value || "").trim().toLowerCase());
+}
+
+function imageQuotaCostPerItem(value: string | null | undefined) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "2k") return 2;
+  if (normalized === "4k") return 3;
+  return 1;
+}
+
+function imageQuotaCostForRequest(count: number, resolution: string | null | undefined) {
+  return Math.max(1, Math.floor(count || 1)) * imageQuotaCostPerItem(resolution);
+}
+
+function openQuotaShop() {
+  if (typeof window === "undefined") return;
+  window.open(QUOTA_SHOP_URL, "_blank", "noopener,noreferrer");
 }
 
 const activeConversationQueueIds = new Set<string>();
@@ -386,7 +416,7 @@ async function recoverConversationHistory(items: ImageConversation[]) {
 }
 
 
-function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
+function ImagePageContent({ isAdmin, storageScope }: { isAdmin: boolean; storageScope: string }) {
   const didLoadQuotaRef = useRef(false);
   const initialLoadCompleteRef = useRef(false);
   const conversationsRef = useRef<ImageConversation[]>([]);
@@ -399,6 +429,8 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   const lastTurnCountRef = useRef<number>(0);
   const lastActiveCountRef = useRef<number>(0);
   const scrollSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeConversationStorageKey = scopedImageStorageKey(ACTIVE_CONVERSATION_STORAGE_KEY, storageScope);
+  const scrollPositionStorageKey = scopedImageStorageKey(SCROLL_POSITION_STORAGE_KEY, storageScope);
 
   const [imagePrompt, setImagePrompt] = useState("");
   const [imageCount, setImageCount] = useState("1");
@@ -438,23 +470,36 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   // 提交前的乐观额度检查：拦掉那些"已发送对话"成功 toast 后又紧跟着 "额度不足" 错误 toast 的双弹。
   // 管理员/不限额度/没拿到额度数据时一律放行，让后端兜底。
   const ensureQuotaForRequest = useCallback(
-    (count: number) => {
+    (count: number, resolution: string | null | undefined = imageResolution) => {
       if (isAdmin) return true;
       if (availableQuota === "∞") return true;
       if (availableQuota === "加载中..." || availableQuota === "--") return true;
       const remaining = Number(availableQuota);
       if (!Number.isFinite(remaining)) return true;
       if (remaining <= 0) {
-        toast.error("额度不足，请联系管理员追加额度后再试");
+        toast.error("额度不足", {
+          description: "购买额度后回到额度弹窗兑换即可继续生成。",
+          action: {
+            label: "购买",
+            onClick: openQuotaShop,
+          },
+        });
         return false;
       }
-      if (remaining < count) {
-        toast.error(`剩余额度仅 ${remaining}，无法生成 ${count} 张`);
+      const required = imageQuotaCostForRequest(count, resolution);
+      if (remaining < required) {
+        toast.error(`剩余额度仅 ${remaining}，本次需要 ${required} 额度`, {
+          description: "购买额度后回到额度弹窗兑换即可继续生成。",
+          action: {
+            label: "购买",
+            onClick: openQuotaShop,
+          },
+        });
         return false;
       }
       return true;
     },
-    [availableQuota, isAdmin],
+    [availableQuota, imageResolution, isAdmin],
   );
   const selectedConversation = useMemo(
     () => conversations.find((item) => item.id === selectedConversationId) ?? null,
@@ -566,7 +611,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         // 滚动位置表只在浏览器侧、首次进入时加载一次
         if (typeof window !== "undefined") {
           try {
-            const raw = window.sessionStorage.getItem(SCROLL_POSITION_STORAGE_KEY);
+            const raw = window.sessionStorage.getItem(scrollPositionStorageKey);
             if (raw) {
               const parsed = JSON.parse(raw);
               if (parsed && typeof parsed === "object") {
@@ -591,7 +636,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         conversationsRef.current = normalizedItems;
         setConversations(normalizedItems);
         const storedConversationId =
-          typeof window !== "undefined" ? window.localStorage.getItem(ACTIVE_CONVERSATION_STORAGE_KEY) : null;
+          typeof window !== "undefined" ? window.localStorage.getItem(activeConversationStorageKey) : null;
         let nextSelectedConversationId: string | null;
         if (storedConversationId === "") {
           // 用户主动通过"新建"进入空状态，刷新后保留空状态
@@ -620,7 +665,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [activeConversationStorageKey, scrollPositionStorageKey]);
 
   const loadQuota = useCallback(async () => {
     if (isAdmin) {
@@ -761,7 +806,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         if (typeof window !== "undefined") {
           try {
             window.sessionStorage.setItem(
-              SCROLL_POSITION_STORAGE_KEY,
+              scrollPositionStorageKey,
               JSON.stringify(scrollPositionsRef.current),
             );
           } catch {
@@ -770,7 +815,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         }
       }
     };
-  }, [selectedConversationId]);
+  }, [scrollPositionStorageKey, selectedConversationId]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -782,12 +827,12 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     }
 
     if (selectedConversationId) {
-      window.localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, selectedConversationId);
+      window.localStorage.setItem(activeConversationStorageKey, selectedConversationId);
     } else {
       // 空串作为"用户主动进入空状态"的标记，区别于从未设置的 null
-      window.localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, "");
+      window.localStorage.setItem(activeConversationStorageKey, "");
     }
-  }, [selectedConversationId]);
+  }, [activeConversationStorageKey, selectedConversationId]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1461,7 +1506,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       }
 
       const count = Math.max(1, sourceTurn.count || sourceTurn.images.length || 1);
-      if (!ensureQuotaForRequest(count)) {
+      if (!ensureQuotaForRequest(count, sourceTurn.resolution)) {
         return;
       }
 
@@ -1502,7 +1547,8 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
         return;
       }
 
-      if (!ensureQuotaForRequest(1)) {
+      const sourceTurn = conversation.turns.find((turn) => turn.id === turnId);
+      if (!ensureQuotaForRequest(1, sourceTurn?.resolution)) {
         return;
       }
 
@@ -1567,7 +1613,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       return;
     }
 
-    if (!ensureQuotaForRequest(parsedCount)) {
+    if (!ensureQuotaForRequest(parsedCount, imageResolution)) {
       return;
     }
 
@@ -1731,7 +1777,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                 if (typeof window === "undefined") return;
                 try {
                   window.sessionStorage.setItem(
-                    SCROLL_POSITION_STORAGE_KEY,
+                    scrollPositionStorageKey,
                     JSON.stringify(scrollPositionsRef.current),
                   );
                 } catch {
@@ -1854,5 +1900,5 @@ export default function ImagePage() {
     );
   }
 
-  return <ImagePageContent isAdmin={session.role === "admin"} />;
+  return <ImagePageContent isAdmin={session.role === "admin"} storageScope={imageStorageScope(session)} />;
 }

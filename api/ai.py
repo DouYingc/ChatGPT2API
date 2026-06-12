@@ -6,15 +6,19 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from api.support import (
     apply_image_account_policy,
+    client_ip_from_request,
     consume_user_quota,
+    image_quota_cost_for_payload,
     refund_user_quota,
     require_identity,
     resolve_image_base_url,
 )
+from services.config import config
 from services.content_filter import check_request, request_text
 from services.image_owners_service import record_owner_for_result
 from services.image_prompts_service import record_prompt_for_result
 from services.log_service import LoggedCall
+from services.rate_limit_service import RateLimitExceeded, rate_limit_service
 from services.protocol import (
     anthropic_v1_messages,
     openai_v1_chat_complete,
@@ -71,6 +75,19 @@ async def filter_or_log(call: LoggedCall, text: str) -> None:
         raise
 
 
+def _enforce_image_ip_limit(identity: dict[str, object], request: Request) -> None:
+    if str(identity.get("role") or "").strip().lower() == "admin":
+        return
+    try:
+        rate_limit_service.check_image(
+            client_ip_from_request(request),
+            limit=config.image_ip_minute_limit,
+            window_seconds=60,
+        )
+    except RateLimitExceeded as exc:
+        raise HTTPException(status_code=429, detail={"error": str(exc)}) from exc
+
+
 def create_router() -> APIRouter:
     router = APIRouter()
 
@@ -91,19 +108,21 @@ def create_router() -> APIRouter:
         identity = require_identity(authorization)
         payload = body.model_dump(mode="python")
         apply_image_account_policy(identity, payload)
-        # /v1 入口按 n 整体扣，1 次提交 = n 张。失败直接 402，不进 call.run。
+        _enforce_image_ip_limit(identity, request)
+        # /v1 入口按 n * 分辨率倍率扣：1K/默认=1，2K=2，4K=3。
         n = max(1, int(body.n or 1))
-        consume_user_quota(identity, n)
+        quota_cost = image_quota_cost_for_payload(payload, count=n)
         payload["base_url"] = resolve_image_base_url(request)
-        # 上游真失败时把扣的 n 退回去——LoggedCall.run / stream 内部失败分支会自动回调。
+        # 上游真失败时把入口扣的额度退回去——LoggedCall.run / stream 内部失败分支会自动回调。
         # 这里 capture identity，failure_refund_amount 跟入口扣的金额一致。
         call = LoggedCall(
             identity, "/v1/images/generations", body.model, "文生图",
             request_text=body.prompt,
             on_failure=lambda amount: refund_user_quota(identity, amount),
-            failure_refund_amount=n,
+            failure_refund_amount=quota_cost,
         )
         await filter_or_log(call, body.prompt)
+        consume_user_quota(identity, quota_cost)
         result = await call.run(openai_v1_image_generations.handle, payload)
         # 对接 dict 返回时把图片归属也写一下；StreamingResponse 不动。
         if isinstance(result, dict):
@@ -138,26 +157,28 @@ def create_router() -> APIRouter:
             "stream": stream,
         }
         apply_image_account_policy(identity, payload)
-        # 同样按 n 整体扣，校验过 n 范围之后再扣，避免无效请求也被记账。
+        _enforce_image_ip_limit(identity, request)
+        # 同样按 n * 分辨率倍率扣，校验过 n 范围之后再扣，避免无效请求也被记账。
         effective_n = max(1, int(n))
-        consume_user_quota(identity, effective_n)
+        quota_cost = image_quota_cost_for_payload(payload, count=effective_n)
         call = LoggedCall(
             identity, "/v1/images/edits", model, "图生图",
             request_text=prompt,
             on_failure=lambda amount: refund_user_quota(identity, amount),
-            failure_refund_amount=effective_n,
+            failure_refund_amount=quota_cost,
         )
         await filter_or_log(call, prompt)
+        consume_user_quota(identity, quota_cost)
         uploads = [*(image or []), *(image_list or [])]
         if not uploads:
             # 已扣的退掉——参数错误本质是 fail-fast，不该让用户白扣
-            refund_user_quota(identity, effective_n)
+            refund_user_quota(identity, quota_cost)
             raise HTTPException(status_code=400, detail={"error": "image file is required"})
         images: list[tuple[bytes, str, str]] = []
         for upload in uploads:
             image_data = await upload.read()
             if not image_data:
-                refund_user_quota(identity, effective_n)
+                refund_user_quota(identity, quota_cost)
                 raise HTTPException(status_code=400, detail={"error": "image file is empty"})
             images.append((image_data, upload.filename or "image.png", upload.content_type or "image/png"))
         payload["images"] = images

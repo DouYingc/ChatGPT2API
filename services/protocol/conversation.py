@@ -15,6 +15,7 @@ from PIL import Image
 
 from services.account_service import account_service
 from services.config import config
+from services.high_res_image_relay_service import high_res_image_relay_service
 from services.openai_backend_api import OpenAIBackendAPI
 from services.protocol.chatgpt_markup import collect_references, sanitize
 from utils.helper import (
@@ -366,20 +367,25 @@ def format_image_result(
     data: list[dict[str, Any]] = []
     for item in items:
         b64_json = str(item.get("b64_json") or "").strip()
-        if not b64_json:
-            continue
         revised_prompt = str(item.get("revised_prompt") or prompt).strip() or prompt
-        if response_format == "b64_json":
+        if b64_json and response_format == "b64_json":
             data.append({
                 "b64_json": b64_json,
                 "url": save_image_bytes(base64.b64decode(b64_json), base_url),
                 "revised_prompt": revised_prompt,
             })
-        else:
+        elif b64_json:
             data.append({
                 "url": save_image_bytes(base64.b64decode(b64_json), base_url),
                 "revised_prompt": revised_prompt,
             })
+        else:
+            url = str(item.get("url") or "").strip()
+            if url:
+                data.append({
+                    "url": url,
+                    "revised_prompt": revised_prompt,
+                })
     result: dict[str, Any] = {"created": created or int(time.time()), "data": data}
     if message and not data:
         result["message"] = message
@@ -975,6 +981,40 @@ def try_stream_codex_image_outputs_with_pool(
     return True, iterator()
 
 
+def stream_high_res_relay_image_outputs(
+        request: ConversationRequest,
+        index: int,
+        total: int,
+) -> Iterator[ImageOutput]:
+    result = high_res_image_relay_service.generate(
+        prompt=request.prompt,
+        model=image_generation_model_for_tool(request.model),
+        size=request.size,
+        resolution=normalize_image_resolution(request.resolution) or request.resolution,
+        images=request.images or None,
+    )
+    data = format_image_result(
+        result.get("items") if isinstance(result.get("items"), list) else [],
+        request.prompt,
+        request.response_format,
+        request.base_url,
+        int(result.get("created") or time.time()),
+    )["data"]
+    if not data:
+        raise RuntimeError("中转接口未返回可用图片")
+    logger.info({
+        "event": "high_res_image_relay_success",
+        "model": request.model,
+        "requested_resolution": request.resolution or "",
+        "requested_size": request.size or "",
+        "target_size": result.get("target_size") or "",
+        "relay_id": result.get("relay_id") or "",
+        "relay_name": result.get("relay_name") or "",
+        "image_count": len(data),
+    })
+    yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data)
+
+
 def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[ImageOutput]:
     if not is_supported_image_model(request.model):
         raise ImageGenerationError("unsupported image model,supported models: " + ", ".join(sorted(IMAGE_MODELS)))
@@ -984,6 +1024,25 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
     normalized_resolution = normalize_image_resolution(request.resolution)
     high_resolution_requested = normalized_resolution in {"2k", "4k"}
     for index in range(1, request.n + 1):
+        if high_resolution_requested:
+            try:
+                for output in stream_high_res_relay_image_outputs(request, index, request.n):
+                    emitted = True
+                    yield output
+                continue
+            except Exception as exc:
+                last_error = str(exc)
+                logger.warning({
+                    "event": "high_res_image_relay_fail",
+                    "model": request.model,
+                    "requested_resolution": request.resolution or "",
+                    "requested_size": request.size or "",
+                    "error": last_error,
+                })
+                raise ImageGenerationError(
+                    image_stream_error_message(last_error),
+                    code="high_resolution_relay_failed",
+                ) from exc
         used_codex, codex_outputs = try_stream_codex_image_outputs_with_pool(request, index, request.n)
         if codex_outputs is not None:
             try:

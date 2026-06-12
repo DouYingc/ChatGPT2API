@@ -1,26 +1,13 @@
 import type { Metadata, Viewport } from "next";
-import { Inter, JetBrains_Mono } from "next/font/google";
 import { Toaster } from "sonner";
 import "./globals.css";
 import { PageTransition } from "@/components/page-transition";
 import { RouteProgress } from "@/components/route-progress";
 import { TopNav } from "@/components/top-nav";
 
-const inter = Inter({
-  subsets: ["latin"],
-  variable: "--font-sans",
-  display: "swap",
-});
-
-const jetbrainsMono = JetBrains_Mono({
-  subsets: ["latin"],
-  variable: "--font-mono",
-  display: "swap",
-});
-
 export const metadata: Metadata = {
-  title: "ChatGPT 号池管理",
-  description: "ChatGPT account pool management dashboard",
+  title: "XY-AI HUB",
+  description: "XY-AI HUB dashboard",
 };
 
 export const viewport: Viewport = {
@@ -37,14 +24,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="zh-CN" className={`${inter.variable} ${jetbrainsMono.variable}`} suppressHydrationWarning>
-      <body
-        className="antialiased font-sans"
-        style={{
-          fontFamily:
-            'var(--font-sans), "PingFang SC", "Microsoft YaHei", "Helvetica Neue", sans-serif',
-        }}
-      >
+    <html lang="zh-CN" suppressHydrationWarning>
+      <body className="antialiased font-sans">
         <Toaster position="top-center" richColors offset={48} />
         <RouteProgress />
         <TopNav />

@@ -2,7 +2,6 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { Github } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
 
 import { clearAuthSessionCache, getValidatedAuthSession } from "@/lib/auth-session";
@@ -20,6 +19,7 @@ const adminNavItems = [
   { href: "/logs", label: "日志管理" },
   { href: "/settings", label: "设置" },
   { href: "/keys", label: "用户密钥" },
+  { href: "/profile", label: "账户" },
 ];
 
 const userNavItems = [
@@ -27,6 +27,7 @@ const userNavItems = [
   { href: "/image", label: "画图" },
   { href: "/works", label: "我的作品" },
   { href: "/gallery", label: "画廊" },
+  { href: "/profile", label: "账户" },
 ];
 
 // next.config.ts 配了 trailingSlash: true，usePathname 返回 "/image/"，
@@ -155,30 +156,10 @@ export function TopNav() {
       <div className="mx-auto flex h-12 max-w-[1440px] items-center gap-3 px-4 sm:h-14 sm:gap-4 sm:px-6 lg:px-8">
         <div className="flex shrink-0 items-center gap-2 sm:gap-3">
           <Link href="/chat" className="group flex shrink-0 -translate-y-[1px] items-center py-1">
-            <span className="text-[20px] font-bold leading-none tracking-[-0.025em] text-foreground">
-              Chat
-            </span>
-            <span className="text-[20px] font-extrabold leading-none tracking-[-0.025em] text-foreground">
-              GPT
-            </span>
-            <span className="ml-[2px] font-data text-[13px] font-semibold leading-none text-muted-foreground/70">
-              2
-            </span>
-            <span className="ml-[2px] font-data text-[16px] font-bold leading-none tracking-[0.02em] text-foreground/85">
-              API
+            <span className="font-data text-[18px] font-extrabold leading-none text-foreground sm:text-[20px]">
+              XY-AI HUB
             </span>
           </Link>
-          <span className="hidden h-5 w-px bg-border lg:block" />
-          <a
-            href="https://github.com/RemotePinee/ChatGPT2API"
-            target="_blank"
-            rel="noreferrer"
-            className="hidden cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-[13px] leading-none text-muted-foreground transition hover:bg-secondary hover:text-foreground lg:inline-flex"
-            aria-label="GitHub repository"
-          >
-            <Github className="size-[15px] shrink-0" strokeWidth={2} />
-            <span className="translate-y-[1px]">GitHub</span>
-          </a>
         </div>
         {showNav ? (
         <nav
@@ -233,6 +214,7 @@ export function TopNav() {
           <div className="min-w-0 flex-1" aria-hidden />
         )}
         <div className="flex shrink-0 items-center justify-end gap-2">
+          <QuotaPopover />
           <span className="hidden items-center gap-1.5 rounded-md border border-border/70 bg-card px-2 py-1 text-[11px] leading-none text-muted-foreground lg:inline-flex">
             <span className="relative flex size-1.5">
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
@@ -251,7 +233,6 @@ export function TopNav() {
                 <span className="hidden font-bold text-muted-foreground lg:inline">{roleLabel}</span>
               </>
             ) : null}
-            <QuotaPopover />
           </span>
           <button
             type="button"

@@ -28,12 +28,46 @@ import {
   type CPAPool,
   type CPARemoteFile,
   type RegisterConfig,
+  type RegisterDefaults,
   type SettingsConfig,
 } from "@/lib/api";
 
 export const PAGE_SIZE_OPTIONS = ["50", "100", "200"] as const;
 
 export type PageSizeOption = (typeof PAGE_SIZE_OPTIONS)[number];
+
+const DEFAULT_REGISTER_DEFAULTS: RegisterDefaults = {
+  image_daily_quota: 0,
+  image_daily_unlimited: true,
+  image_monthly_quota: 0,
+  image_monthly_unlimited: true,
+  image_total_quota: 100,
+  image_total_unlimited: false,
+  chat_daily_quota: 0,
+  chat_daily_unlimited: true,
+  chat_monthly_quota: 0,
+  chat_monthly_unlimited: true,
+  chat_total_quota: 0,
+  chat_total_unlimited: true,
+};
+
+function normalizeRegisterDefaults(value: SettingsConfig["register_defaults"]): RegisterDefaults {
+  const source = (typeof value === "object" && value ? value : {}) as Partial<RegisterDefaults>;
+  return {
+    image_daily_quota: Number(source.image_daily_quota ?? DEFAULT_REGISTER_DEFAULTS.image_daily_quota),
+    image_daily_unlimited: Boolean(source.image_daily_unlimited ?? DEFAULT_REGISTER_DEFAULTS.image_daily_unlimited),
+    image_monthly_quota: Number(source.image_monthly_quota ?? DEFAULT_REGISTER_DEFAULTS.image_monthly_quota),
+    image_monthly_unlimited: Boolean(source.image_monthly_unlimited ?? DEFAULT_REGISTER_DEFAULTS.image_monthly_unlimited),
+    image_total_quota: Number(source.image_total_quota ?? DEFAULT_REGISTER_DEFAULTS.image_total_quota),
+    image_total_unlimited: Boolean(source.image_total_unlimited ?? DEFAULT_REGISTER_DEFAULTS.image_total_unlimited),
+    chat_daily_quota: Number(source.chat_daily_quota ?? DEFAULT_REGISTER_DEFAULTS.chat_daily_quota),
+    chat_daily_unlimited: Boolean(source.chat_daily_unlimited ?? DEFAULT_REGISTER_DEFAULTS.chat_daily_unlimited),
+    chat_monthly_quota: Number(source.chat_monthly_quota ?? DEFAULT_REGISTER_DEFAULTS.chat_monthly_quota),
+    chat_monthly_unlimited: Boolean(source.chat_monthly_unlimited ?? DEFAULT_REGISTER_DEFAULTS.chat_monthly_unlimited),
+    chat_total_quota: Number(source.chat_total_quota ?? DEFAULT_REGISTER_DEFAULTS.chat_total_quota),
+    chat_total_unlimited: Boolean(source.chat_total_unlimited ?? DEFAULT_REGISTER_DEFAULTS.chat_total_unlimited),
+  };
+}
 
 function normalizeConfig(config: SettingsConfig): SettingsConfig {
   const backup = typeof config.backup === "object" && config.backup
@@ -55,6 +89,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
         register: true,
         cpa: true,
         sub2api: true,
+        high_res_relays: true,
         logs: true,
         image_tasks: true,
         accounts_snapshot: true,
@@ -71,11 +106,16 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     cleanup_protect_user_images: Boolean(config.cleanup_protect_user_images ?? true),
     image_poll_timeout_secs: Number(config.image_poll_timeout_secs || 120),
     image_account_concurrency: Number(config.image_account_concurrency || 3),
+    register_ip_daily_limit: Number(config.register_ip_daily_limit ?? 3),
+    image_ip_minute_limit: Number(config.image_ip_minute_limit ?? 10),
+    high_res_relay_fail_threshold: Number(config.high_res_relay_fail_threshold ?? 3),
+    high_res_relay_cooldown_seconds: Number(config.high_res_relay_cooldown_seconds ?? 300),
     auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
     auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
     log_levels: Array.isArray(config.log_levels) ? config.log_levels : [],
     proxy: typeof config.proxy === "string" ? config.proxy : "",
     base_url: typeof config.base_url === "string" ? config.base_url : "",
+    register_defaults: normalizeRegisterDefaults(config.register_defaults),
     global_system_prompt: String(config.global_system_prompt || ""),
     sensitive_words: Array.isArray(config.sensitive_words) ? config.sensitive_words : [],
     ai_review: {
@@ -102,6 +142,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
         register: Boolean(backup.include?.register ?? true),
         cpa: Boolean(backup.include?.cpa ?? true),
         sub2api: Boolean(backup.include?.sub2api ?? true),
+        high_res_relays: Boolean(backup.include?.high_res_relays ?? true),
         logs: Boolean(backup.include?.logs ?? true),
         image_tasks: Boolean(backup.include?.image_tasks ?? true),
         accounts_snapshot: Boolean(backup.include?.accounts_snapshot ?? true),
@@ -210,8 +251,14 @@ type SettingsStore = {
   setCleanupProtectUserImages: (value: boolean) => void;
   setImagePollTimeoutSecs: (value: string) => void;
   setImageAccountConcurrency: (value: string) => void;
+  setRegisterIpDailyLimit: (value: string) => void;
+  setImageIpMinuteLimit: (value: string) => void;
+  setHighResRelayFailThreshold: (value: string) => void;
+  setHighResRelayCooldownSeconds: (value: string) => void;
   setAutoRemoveInvalidAccounts: (value: boolean) => void;
   setAutoRemoveRateLimitedAccounts: (value: boolean) => void;
+  setRegisterDefaultQuota: (key: "image_total_quota" | "chat_total_quota", value: string) => void;
+  setRegisterDefaultUnlimited: (key: "image_total_unlimited" | "chat_total_unlimited", value: boolean) => void;
   setLogLevel: (level: string, enabled: boolean) => void;
   setProxy: (value: string) => void;
   setBaseUrl: (value: string) => void;
@@ -375,8 +422,19 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         cleanup_protect_user_images: Boolean(config.cleanup_protect_user_images ?? true),
         image_poll_timeout_secs: Math.max(1, Number(config.image_poll_timeout_secs) || 120),
         image_account_concurrency: Math.max(1, Number(config.image_account_concurrency) || 3),
+        register_ip_daily_limit: Math.max(0, Number(config.register_ip_daily_limit) || 0),
+        image_ip_minute_limit: Math.max(0, Number(config.image_ip_minute_limit) || 0),
+        high_res_relay_fail_threshold: Math.max(1, Number(config.high_res_relay_fail_threshold) || 3),
+        high_res_relay_cooldown_seconds: Math.max(30, Number(config.high_res_relay_cooldown_seconds) || 300),
         auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
         auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
+        register_defaults: {
+          ...(config.register_defaults || DEFAULT_REGISTER_DEFAULTS),
+          image_total_quota: Math.max(0, Number(config.register_defaults?.image_total_quota) || 0),
+          image_total_unlimited: Boolean(config.register_defaults?.image_total_unlimited),
+          chat_total_quota: Math.max(0, Number(config.register_defaults?.chat_total_quota) || 0),
+          chat_total_unlimited: Boolean(config.register_defaults?.chat_total_unlimited),
+        },
         proxy: config.proxy.trim(),
         base_url: String(config.base_url || "").trim(),
         global_system_prompt: String(config.global_system_prompt || "").trim(),
@@ -449,12 +507,60 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     set((state) => state.config ? { config: { ...state.config, image_account_concurrency: value }, isDirty: true } : {});
   },
 
+  setRegisterIpDailyLimit: (value) => {
+    set((state) => state.config ? { config: { ...state.config, register_ip_daily_limit: value }, isDirty: true } : {});
+  },
+
+  setImageIpMinuteLimit: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_ip_minute_limit: value }, isDirty: true } : {});
+  },
+
+  setHighResRelayFailThreshold: (value) => {
+    set((state) => state.config ? { config: { ...state.config, high_res_relay_fail_threshold: value }, isDirty: true } : {});
+  },
+
+  setHighResRelayCooldownSeconds: (value) => {
+    set((state) => state.config ? { config: { ...state.config, high_res_relay_cooldown_seconds: value }, isDirty: true } : {});
+  },
+
   setAutoRemoveInvalidAccounts: (value) => {
     set((state) => state.config ? { config: { ...state.config, auto_remove_invalid_accounts: value }, isDirty: true } : {});
   },
 
   setAutoRemoveRateLimitedAccounts: (value) => {
     set((state) => state.config ? { config: { ...state.config, auto_remove_rate_limited_accounts: value }, isDirty: true } : {});
+  },
+
+  setRegisterDefaultQuota: (key, value) => {
+    set((state) => {
+      if (!state.config) return {};
+      return {
+        config: {
+          ...state.config,
+          register_defaults: {
+            ...normalizeRegisterDefaults(state.config.register_defaults),
+            [key]: value,
+          },
+        },
+        isDirty: true,
+      };
+    });
+  },
+
+  setRegisterDefaultUnlimited: (key, value) => {
+    set((state) => {
+      if (!state.config) return {};
+      return {
+        config: {
+          ...state.config,
+          register_defaults: {
+            ...normalizeRegisterDefaults(state.config.register_defaults),
+            [key]: value,
+          },
+        },
+        isDirty: true,
+      };
+    });
   },
 
   setLogLevel: (level, enabled) => {

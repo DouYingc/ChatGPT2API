@@ -4,7 +4,7 @@ from fastapi import APIRouter, Header, HTTPException, Response
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
-from services.auth_service import auth_service
+from services.auth_service import AuthAccountDisabledError, auth_service
 
 from api.support import (
     require_admin,
@@ -27,6 +27,8 @@ from services.sub2api_service import (
 
 class UserKeyCreateRequest(BaseModel):
     name: str = ""
+    username: str = ""
+    password: str = ""
     key: str = ""
     account_tier: str = "free"
     image_daily_quota: int = 0
@@ -45,6 +47,8 @@ class UserKeyCreateRequest(BaseModel):
 
 class UserKeyUpdateRequest(BaseModel):
     name: str | None = None
+    username: str | None = None
+    password: str | None = None
     enabled: bool | None = None
     key: str | None = None
     account_tier: str | None = None
@@ -70,6 +74,11 @@ class UserKeyUpdateRequest(BaseModel):
 
 class UserKeyRegenerateRequest(BaseModel):
     key: str = ""
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = ""
+    new_password: str = ""
 
 
 class AccountCreateRequest(BaseModel):
@@ -175,6 +184,26 @@ def create_router() -> APIRouter:
             raise HTTPException(status_code=404, detail={"error": "用户不存在"})
         return {"identity": record}
 
+    @router.post("/api/auth/me/password")
+    async def change_my_password(body: ChangePasswordRequest, authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        item_id = str(identity.get("id") or "").strip()
+        if not item_id or item_id == "admin" or str(identity.get("role") or "").strip().lower() != "user":
+            raise HTTPException(status_code=400, detail={"error": "当前登录方式不支持修改密码"})
+        try:
+            record = auth_service.change_password(
+                item_id,
+                current_password=body.current_password,
+                new_password=body.new_password,
+            )
+        except AuthAccountDisabledError as exc:
+            raise HTTPException(status_code=403, detail={"error": str(exc)}) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        if record is None:
+            raise HTTPException(status_code=404, detail={"error": "用户不存在"})
+        return {"ok": True, "identity": record}
+
     @router.post("/api/auth/users")
     async def create_user_key(body: UserKeyCreateRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
@@ -182,6 +211,8 @@ def create_router() -> APIRouter:
             item, raw_key = auth_service.create_key(
                 role="user",
                 name=body.name,
+                username=body.username,
+                password=body.password,
                 key=body.key,
                 account_tier=body.account_tier,
                 image_daily_quota=max(0, int(body.image_daily_quota or 0)),
@@ -210,9 +241,17 @@ def create_router() -> APIRouter:
         require_admin(authorization)
         candidate = body.model_dump(exclude_none=True)
         # 名称和 key 不能为空字符串触发改动；其余 bool / int 全部按字面值透传到 service。
-        updates: dict[str, object] = {key: value for key, value in candidate.items() if key not in {"name", "key"}}
+        updates: dict[str, object] = {
+            key: value
+            for key, value in candidate.items()
+            if key not in {"name", "username", "password", "key"}
+        }
         if "name" in candidate:
             updates["name"] = candidate["name"]
+        if "username" in candidate:
+            updates["username"] = candidate["username"]
+        if "password" in candidate:
+            updates["password"] = candidate["password"]
         if "key" in candidate:
             updates["key"] = candidate["key"]
         if not updates:

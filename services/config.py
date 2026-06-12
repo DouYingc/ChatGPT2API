@@ -20,12 +20,28 @@ DEFAULT_BACKUP_INCLUDE = {
     "register": True,
     "cpa": True,
     "sub2api": True,
+    "high_res_relays": True,
     "logs": True,
     "image_tasks": True,
     "accounts_snapshot": True,
     "auth_keys_snapshot": True,
     "chat_conversations_snapshot": True,
     "images": False,
+}
+
+DEFAULT_REGISTER_QUOTAS = {
+    "image_daily_quota": 0,
+    "image_daily_unlimited": True,
+    "image_monthly_quota": 0,
+    "image_monthly_unlimited": True,
+    "image_total_quota": 100,
+    "image_total_unlimited": False,
+    "chat_daily_quota": 0,
+    "chat_daily_unlimited": True,
+    "chat_monthly_quota": 0,
+    "chat_monthly_unlimited": True,
+    "chat_total_quota": 0,
+    "chat_total_unlimited": True,
 }
 
 
@@ -72,6 +88,48 @@ def _normalize_backup_settings(value: object) -> dict[str, object]:
         "encrypt": _normalize_bool(source.get("encrypt"), False),
         "passphrase": str(source.get("passphrase") or "").strip(),
         "include": _normalize_backup_include(source.get("include")),
+    }
+
+
+def _normalize_register_defaults(value: object) -> dict[str, object]:
+    source = value if isinstance(value, dict) else {}
+    return {
+        "image_daily_quota": _normalize_positive_int(
+            source.get("image_daily_quota"), int(DEFAULT_REGISTER_QUOTAS["image_daily_quota"]), 0
+        ),
+        "image_daily_unlimited": _normalize_bool(
+            source.get("image_daily_unlimited"), bool(DEFAULT_REGISTER_QUOTAS["image_daily_unlimited"])
+        ),
+        "image_monthly_quota": _normalize_positive_int(
+            source.get("image_monthly_quota"), int(DEFAULT_REGISTER_QUOTAS["image_monthly_quota"]), 0
+        ),
+        "image_monthly_unlimited": _normalize_bool(
+            source.get("image_monthly_unlimited"), bool(DEFAULT_REGISTER_QUOTAS["image_monthly_unlimited"])
+        ),
+        "image_total_quota": _normalize_positive_int(
+            source.get("image_total_quota"), int(DEFAULT_REGISTER_QUOTAS["image_total_quota"]), 0
+        ),
+        "image_total_unlimited": _normalize_bool(
+            source.get("image_total_unlimited"), bool(DEFAULT_REGISTER_QUOTAS["image_total_unlimited"])
+        ),
+        "chat_daily_quota": _normalize_positive_int(
+            source.get("chat_daily_quota"), int(DEFAULT_REGISTER_QUOTAS["chat_daily_quota"]), 0
+        ),
+        "chat_daily_unlimited": _normalize_bool(
+            source.get("chat_daily_unlimited"), bool(DEFAULT_REGISTER_QUOTAS["chat_daily_unlimited"])
+        ),
+        "chat_monthly_quota": _normalize_positive_int(
+            source.get("chat_monthly_quota"), int(DEFAULT_REGISTER_QUOTAS["chat_monthly_quota"]), 0
+        ),
+        "chat_monthly_unlimited": _normalize_bool(
+            source.get("chat_monthly_unlimited"), bool(DEFAULT_REGISTER_QUOTAS["chat_monthly_unlimited"])
+        ),
+        "chat_total_quota": _normalize_positive_int(
+            source.get("chat_total_quota"), int(DEFAULT_REGISTER_QUOTAS["chat_total_quota"]), 0
+        ),
+        "chat_total_unlimited": _normalize_bool(
+            source.get("chat_total_unlimited"), bool(DEFAULT_REGISTER_QUOTAS["chat_total_unlimited"])
+        ),
     }
 
 
@@ -212,6 +270,34 @@ class ConfigStore:
             return 3
 
     @property
+    def register_ip_daily_limit(self) -> int:
+        try:
+            return max(0, int(self.data.get("register_ip_daily_limit", 3)))
+        except (TypeError, ValueError):
+            return 3
+
+    @property
+    def image_ip_minute_limit(self) -> int:
+        try:
+            return max(0, int(self.data.get("image_ip_minute_limit", 10)))
+        except (TypeError, ValueError):
+            return 10
+
+    @property
+    def high_res_relay_fail_threshold(self) -> int:
+        try:
+            return max(1, int(self.data.get("high_res_relay_fail_threshold", 3)))
+        except (TypeError, ValueError):
+            return 3
+
+    @property
+    def high_res_relay_cooldown_seconds(self) -> int:
+        try:
+            return max(30, int(self.data.get("high_res_relay_cooldown_seconds", 300)))
+        except (TypeError, ValueError):
+            return 300
+
+    @property
     def auto_remove_invalid_accounts(self) -> bool:
         value = self.data.get("auto_remove_invalid_accounts", False)
         if isinstance(value, str):
@@ -242,6 +328,10 @@ class ConfigStore:
     def ai_review(self) -> dict[str, object]:
         value = self.data.get("ai_review")
         return value if isinstance(value, dict) else {}
+
+    @property
+    def register_defaults(self) -> dict[str, object]:
+        return _normalize_register_defaults(self.data.get("register_defaults"))
 
     @property
     def global_system_prompt(self) -> str:
@@ -336,11 +426,16 @@ class ConfigStore:
         data["cleanup_protect_user_images"] = self.cleanup_protect_user_images
         data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
         data["image_account_concurrency"] = self.image_account_concurrency
+        data["register_ip_daily_limit"] = self.register_ip_daily_limit
+        data["image_ip_minute_limit"] = self.image_ip_minute_limit
+        data["high_res_relay_fail_threshold"] = self.high_res_relay_fail_threshold
+        data["high_res_relay_cooldown_seconds"] = self.high_res_relay_cooldown_seconds
         data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts
         data["auto_remove_rate_limited_accounts"] = self.auto_remove_rate_limited_accounts
         data["log_levels"] = self.log_levels
         data["sensitive_words"] = self.sensitive_words
         data["ai_review"] = self.ai_review
+        data["register_defaults"] = self.register_defaults
         data["global_system_prompt"] = self.global_system_prompt
         data["backup"] = self.get_backup_settings()
         data.pop("auth-key", None)
@@ -354,6 +449,8 @@ class ConfigStore:
         next_data.update(dict(data or {}))
         if "backup" in next_data:
             next_data["backup"] = _normalize_backup_settings(next_data.get("backup"))
+        if "register_defaults" in next_data:
+            next_data["register_defaults"] = _normalize_register_defaults(next_data.get("register_defaults"))
         next_data.pop("backup_state", None)
         self.data = next_data
         self._save()

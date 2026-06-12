@@ -68,6 +68,7 @@ type AccountUpdateResponse = {
 export type SettingsConfig = {
   proxy: string;
   base_url?: string;
+  register_defaults?: RegisterDefaults;
   global_system_prompt?: string;
   sensitive_words?: string[];
   ai_review?: {
@@ -83,6 +84,10 @@ export type SettingsConfig = {
   cleanup_protect_user_images?: boolean;
   image_poll_timeout_secs?: number | string;
   image_account_concurrency?: number | string;
+  register_ip_daily_limit?: number | string;
+  image_ip_minute_limit?: number | string;
+  high_res_relay_fail_threshold?: number | string;
+  high_res_relay_cooldown_seconds?: number | string;
   auto_remove_invalid_accounts?: boolean;
   auto_remove_rate_limited_accounts?: boolean;
   log_levels?: string[];
@@ -91,11 +96,27 @@ export type SettingsConfig = {
   [key: string]: unknown;
 };
 
+export type RegisterDefaults = {
+  image_daily_quota: number | string;
+  image_daily_unlimited: boolean;
+  image_monthly_quota: number | string;
+  image_monthly_unlimited: boolean;
+  image_total_quota: number | string;
+  image_total_unlimited: boolean;
+  chat_daily_quota: number | string;
+  chat_daily_unlimited: boolean;
+  chat_monthly_quota: number | string;
+  chat_monthly_unlimited: boolean;
+  chat_total_quota: number | string;
+  chat_total_unlimited: boolean;
+};
+
 export type BackupInclude = {
   config: boolean;
   register: boolean;
   cpa: boolean;
   sub2api: boolean;
+  high_res_relays: boolean;
   logs: boolean;
   image_tasks: boolean;
   accounts_snapshot: boolean;
@@ -226,6 +247,7 @@ type ImageTaskCancelResponse = {
 export type LoginResponse = {
   ok: boolean;
   version: string;
+  key?: string;
   role: AuthRole;
   subject_id: string;
   name: string;
@@ -237,6 +259,8 @@ export type LoginResponse = {
 export type UserKey = {
   id: string;
   name: string;
+  username?: string | null;
+  has_password?: boolean;
   role: "user";
   enabled: boolean;
   created_at: string | null;
@@ -275,7 +299,12 @@ export type UserKey = {
 export type AuthIdentity = {
   id: string;
   name: string;
+  username?: string | null;
+  has_password?: boolean;
+  key_visible?: boolean;
   role: AuthRole;
+  created_at?: string | null;
+  last_used_at?: string | null;
   account_tier?: AccountTier;
   can_use_paid_image_accounts?: boolean;
   can_use_high_resolution?: boolean;
@@ -303,6 +332,67 @@ export type AuthIdentity = {
   chat_total_used: number;
   chat_total_unlimited: boolean;
   chat_total_remaining: number | null;
+};
+
+export type RedeemCode = {
+  id: string;
+  code: string;
+  amount: 100 | 500 | 1000 | number;
+  enabled: boolean;
+  used: boolean;
+  used_by?: string;
+  used_by_name?: string;
+  used_at?: string | null;
+  created_by?: string;
+  created_by_name?: string;
+  created_at?: string | null;
+};
+
+export type HighResRelay = {
+  id: string;
+  name: string;
+  base_url: string;
+  model: string;
+  mode?: "images" | "chat_completions" | string;
+  enabled: boolean;
+  has_api_key: boolean;
+  success: number;
+  fail: number;
+  avg_duration_ms?: number;
+  today_success?: number;
+  today_fail?: number;
+  today_avg_duration_ms?: number;
+  consecutive_fail?: number;
+  temporarily_paused?: boolean;
+  paused_until?: string | null;
+  pause_reason?: string;
+  pause_remaining_seconds?: number;
+  last_used_at?: string | null;
+  last_error?: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type QuotaLedgerEntry = {
+  id: string;
+  created_at?: string | null;
+  user_id: string;
+  user_name: string;
+  role: string;
+  kind: "image" | "chat" | string;
+  action: string;
+  amount: number;
+  source: string;
+  note: string;
+  remaining?: Record<string, number | null>;
+  meta?: Record<string, unknown>;
+};
+
+export type HighResRelayTestResult = {
+  ok: boolean;
+  status: number;
+  latency_ms: number;
+  error: string;
 };
 
 export type RegisterConfig = {
@@ -353,6 +443,22 @@ export async function login(authKey: string) {
     headers: {
       Authorization: `Bearer ${normalizedAuthKey}`,
     },
+    redirectOnUnauthorized: false,
+  });
+}
+
+export async function loginWithPassword(username: string, password: string) {
+  return httpRequest<LoginResponse>("/auth/password/login", {
+    method: "POST",
+    body: { username, password },
+    redirectOnUnauthorized: false,
+  });
+}
+
+export async function registerWithPassword(username: string, password: string) {
+  return httpRequest<LoginResponse>("/auth/register", {
+    method: "POST",
+    body: { username, password },
     redirectOnUnauthorized: false,
   });
 }
@@ -661,8 +767,110 @@ export async function fetchMyIdentity() {
   return httpRequest<{ identity: AuthIdentity }>("/api/auth/me");
 }
 
+export async function changeMyPassword(currentPassword: string, newPassword: string) {
+  return httpRequest<{ ok: boolean; identity: AuthIdentity }>("/api/auth/me/password", {
+    method: "POST",
+    body: {
+      current_password: currentPassword,
+      new_password: newPassword,
+    },
+  });
+}
+
+export async function redeemQuotaCode(code: string) {
+  return httpRequest<{ ok: boolean; amount: number; code: RedeemCode; identity: AuthIdentity }>("/api/redeem", {
+    method: "POST",
+    body: { code },
+  });
+}
+
+export async function fetchRedeemCodes() {
+  return httpRequest<{ items: RedeemCode[]; amounts: number[] }>("/api/redeem-codes");
+}
+
+export async function createRedeemCodes(payload: { amount: number; quantity?: number }) {
+  return httpRequest<{ created: RedeemCode[]; items: RedeemCode[]; amounts: number[] }>("/api/redeem-codes", {
+    method: "POST",
+    body: {
+      amount: payload.amount,
+      quantity: Math.max(1, Math.min(100, Math.floor(Number(payload.quantity ?? 1) || 1))),
+    },
+  });
+}
+
+export async function deleteRedeemCode(codeId: string) {
+  return httpRequest<{ items: RedeemCode[]; amounts: number[] }>(`/api/redeem-codes/${codeId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function fetchQuotaLedger(params?: { userId?: string; limit?: number }) {
+  const search = new URLSearchParams();
+  if (params?.userId) search.set("user_id", params.userId);
+  if (params?.limit) search.set("limit", String(params.limit));
+  const suffix = search.toString() ? `?${search.toString()}` : "";
+  return httpRequest<{ items: QuotaLedgerEntry[] }>(`/api/quota-ledger${suffix}`);
+}
+
+export async function fetchHighResRelays() {
+  return httpRequest<{ items: HighResRelay[] }>("/api/high-res-relays");
+}
+
+export async function createHighResRelay(payload: {
+  name?: string;
+  base_url: string;
+  api_key: string;
+  model?: string;
+  mode?: string;
+  enabled?: boolean;
+}) {
+  return httpRequest<{ item: HighResRelay; items: HighResRelay[] }>("/api/high-res-relays", {
+    method: "POST",
+    body: {
+      name: payload.name ?? "",
+      base_url: payload.base_url,
+      api_key: payload.api_key,
+      model: payload.model ?? "gpt-image-2",
+      mode: payload.mode ?? "images",
+      enabled: payload.enabled ?? true,
+    },
+  });
+}
+
+export async function updateHighResRelay(
+  relayId: string,
+  updates: {
+    name?: string;
+    base_url?: string;
+    api_key?: string;
+    model?: string;
+    mode?: string;
+    enabled?: boolean;
+  },
+) {
+  return httpRequest<{ item: HighResRelay; items: HighResRelay[] }>(`/api/high-res-relays/${relayId}`, {
+    method: "POST",
+    body: updates,
+  });
+}
+
+export async function deleteHighResRelay(relayId: string) {
+  return httpRequest<{ items: HighResRelay[] }>(`/api/high-res-relays/${relayId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function testHighResRelay(relayId: string) {
+  return httpRequest<{ result: HighResRelayTestResult }>(`/api/high-res-relays/${relayId}/test`, {
+    method: "POST",
+    body: {},
+  });
+}
+
 export type UserKeyCreatePayload = {
   name?: string;
+  username?: string;
+  password?: string;
   key?: string;
   account_tier?: AccountTier;
   image_daily_quota?: number;
@@ -682,6 +890,8 @@ export type UserKeyCreatePayload = {
 export type UserKeyUpdatePayload = {
   enabled?: boolean;
   name?: string;
+  username?: string;
+  password?: string;
   key?: string;
   account_tier?: AccountTier;
   image_daily_quota?: number;
@@ -709,6 +919,8 @@ export async function createUserKey(payload: UserKeyCreatePayload) {
     method: "POST",
     body: {
       name: payload.name ?? "",
+      username: payload.username ?? "",
+      ...(payload.password ? { password: payload.password } : {}),
       ...(payload.key ? { key: payload.key } : {}),
       account_tier: payload.account_tier ?? "free",
       image_daily_quota: Math.max(0, Number(payload.image_daily_quota ?? 0) || 0),

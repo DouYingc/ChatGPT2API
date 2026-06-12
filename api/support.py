@@ -14,6 +14,10 @@ from utils.helper import split_image_model
 BASE_DIR = Path(__file__).resolve().parents[1]
 WEB_DIST_DIR = BASE_DIR / "web_dist"
 PAID_PLAN_TYPES = ("Pro", "Plus", "Team")
+IMAGE_RESOLUTION_QUOTA_COST = {
+    "2k": 2,
+    "4k": 3,
+}
 
 
 def _normalize_plan_type(value: object) -> str:
@@ -65,6 +69,16 @@ def resolve_image_base_url(request: Request) -> str:
     return config.base_url or f"{request.url.scheme}://{request.headers.get('host', request.url.netloc)}"
 
 
+def client_ip_from_request(request: Request) -> str:
+    forwarded = str(request.headers.get("x-forwarded-for") or "").split(",", 1)[0].strip()
+    if forwarded:
+        return forwarded
+    real_ip = str(request.headers.get("x-real-ip") or "").strip()
+    if real_ip:
+        return real_ip
+    return str(request.client.host if request.client else "").strip() or "unknown"
+
+
 def raise_image_quota_error(exc: Exception) -> None:
     message = str(exc)
     if "no available image quota" in message.lower():
@@ -76,10 +90,15 @@ def can_use_paid_image_accounts(identity: dict[str, object]) -> bool:
     role = str(identity.get("role") or "").strip().lower()
     if role == "admin":
         return True
-    if bool(identity.get("can_use_paid_image_accounts")) or bool(identity.get("can_use_high_resolution")):
+    if bool(identity.get("can_use_paid_image_accounts")):
         return True
     tier = str(identity.get("account_tier") or "").strip().lower()
     return tier in {"premium", "advanced", "paid", "plus", "pro", "team", "enterprise", "vip"}
+
+
+def can_use_high_resolution(identity: dict[str, object]) -> bool:
+    role = str(identity.get("role") or "").strip().lower()
+    return role == "admin" or bool(identity.get("can_use_high_resolution")) or can_use_paid_image_accounts(identity)
 
 
 def image_allowed_plan_types(identity: dict[str, object]) -> tuple[str, ...] | None:
@@ -121,13 +140,14 @@ def text_allowed_plan_types(identity: dict[str, object]) -> tuple[str, ...] | No
 
 def apply_image_account_policy(identity: dict[str, object], payload: dict[str, object]) -> dict[str, object]:
     """按用户密钥等级给画图请求打服务端账号池约束。
-    前端禁用 2K/4K 只是体验；这里才是防 F12 / 直接调接口的硬限制。"""
+    普通用户兑换额度后才允许 2K/4K；高清请求由系统内部选择可用高清上游。"""
     allowed = image_allowed_plan_types(identity)
     if allowed is None:
         return payload
 
     model_plan_type, base_model = split_image_model(payload.get("model"))
     requested_plan_type = _normalize_plan_type(payload.get("plan_type"))
+    high_resolution_requested = normalize_image_resolution(payload.get("resolution")) in {"2k", "4k"}
     if can_use_paid_image_accounts(identity):
         if requested_plan_type and requested_plan_type not in allowed:
             raise HTTPException(status_code=403, detail={"error": "当前用户权限只能使用 Plus / Pro 账号"})
@@ -137,13 +157,33 @@ def apply_image_account_policy(identity: dict[str, object], payload: dict[str, o
         if requested_plan_type:
             payload["plan_type"] = requested_plan_type
     else:
-        if normalize_image_resolution(payload.get("resolution")) in {"2k", "4k"}:
-            raise HTTPException(status_code=403, detail={"error": "当前用户权限不支持 2K/4K 画图"})
+        if requested_plan_type and requested_plan_type != "free":
+            raise HTTPException(status_code=403, detail={"error": "当前用户权限不能手动指定 Plus / Pro 账号"})
         if model_plan_type or base_model == "codex-gpt-image-2":
             raise HTTPException(status_code=403, detail={"error": "当前用户权限只能使用 free 画图账号"})
-        payload["plan_type"] = "free"
+        if high_resolution_requested:
+            if not can_use_high_resolution(identity):
+                raise HTTPException(status_code=403, detail={"error": "请先兑换额度后使用 2K/4K 画图"})
+            payload.pop("plan_type", None)
+            allowed = PAID_PLAN_TYPES
+        else:
+            payload["plan_type"] = "free"
     payload["allowed_plan_types"] = allowed
     return payload
+
+
+def image_quota_cost(resolution: object, count: int = 1) -> int:
+    normalized = normalize_image_resolution(resolution)
+    per_image = IMAGE_RESOLUTION_QUOTA_COST.get(str(normalized or ""), 1)
+    try:
+        image_count = max(1, int(count or 1))
+    except (TypeError, ValueError):
+        image_count = 1
+    return max(1, per_image * image_count)
+
+
+def image_quota_cost_for_payload(payload: dict[str, object], count: int = 1) -> int:
+    return image_quota_cost(payload.get("resolution"), count=count)
 
 
 def consume_user_quota(identity: dict[str, object], amount: int) -> None:

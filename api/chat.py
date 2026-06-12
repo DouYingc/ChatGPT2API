@@ -8,16 +8,18 @@ import time
 from pathlib import Path
 from typing import Any, Iterator
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from api.support import (
     apply_image_account_policy,
     can_use_paid_image_accounts,
+    client_ip_from_request,
     consume_user_chat_quota,
     consume_user_quota,
     enforce_text_account_policy,
+    image_quota_cost_for_payload,
     refund_user_chat_quota,
     refund_user_quota,
     require_identity,
@@ -29,6 +31,7 @@ from services.config import config
 from services.image_owners_service import record_owner_for_result
 from services.image_prompts_service import record_prompt_for_result
 from services.log_service import LOG_TYPE_CALL, log_service
+from services.rate_limit_service import RateLimitExceeded, rate_limit_service
 from services.protocol.conversation import (
     ConversationRequest,
     delete_conversation_safely,
@@ -51,6 +54,19 @@ class ChatConversationUpsertRequest(BaseModel):
     title: str = ""
     messages: list[dict[str, Any]] = Field(default_factory=list)
     upstream_conversation_id: str | None = None
+
+
+def _enforce_image_ip_limit(identity: dict[str, object], request: Request) -> None:
+    if str(identity.get("role") or "").strip().lower() == "admin":
+        return
+    try:
+        rate_limit_service.check_image(
+            client_ip_from_request(request),
+            limit=config.image_ip_minute_limit,
+            window_seconds=60,
+        )
+    except RateLimitExceeded as exc:
+        raise HTTPException(status_code=429, detail={"error": str(exc)}) from exc
 
 
 _IMAGE_ACTION_RE = re.compile(
@@ -310,6 +326,7 @@ def _stream_image(body: ChatStreamRequest, identity: dict[str, Any], policy_payl
         return
     selected_model = str(policy_payload.get("model") or (body.model if is_supported_image_model(body.model) else "gpt-image-2"))
     account_type = str(policy_payload.get("plan_type") or body.account_type or "").strip() or None
+    quota_cost = max(1, int(policy_payload.get("quota_cost") or 1))
     started = time.time()
     delivered_any = False
     result_data: list[dict[str, Any]] = []
@@ -334,7 +351,7 @@ def _stream_image(body: ChatStreamRequest, identity: dict[str, Any], policy_payl
             delivered_any = True
             yield _sse({"type": "delta", "text": content})
         if not delivered_any:
-            refund_user_quota(identity, 1)
+            refund_user_quota(identity, quota_cost)
             message = "图片生成没有返回结果，请检查后端日志或可用画图账号"
             _log_chat_call(
                 identity,
@@ -363,7 +380,7 @@ def _stream_image(body: ChatStreamRequest, identity: dict[str, Any], policy_payl
         yield _sse({"type": "done"})
     except Exception as exc:
         if not delivered_any:
-            refund_user_quota(identity, 1)
+            refund_user_quota(identity, quota_cost)
         _log_chat_call(
             identity,
             summary="对话生图失败",
@@ -481,7 +498,7 @@ def create_router() -> APIRouter:
     router = APIRouter()
 
     @router.post("/api/chat/stream")
-    async def chat_stream(body: ChatStreamRequest, authorization: str | None = Header(default=None)):
+    async def chat_stream(body: ChatStreamRequest, request: Request, authorization: str | None = Header(default=None)):
         identity = require_identity(authorization)
         if not body.messages:
             raise HTTPException(status_code=400, detail={"error": "messages is required"})
@@ -491,7 +508,10 @@ def create_router() -> APIRouter:
                 "plan_type": body.account_type,
             }
             apply_image_account_policy(identity, image_policy_payload)
-            consume_user_quota(identity, 1)
+            _enforce_image_ip_limit(identity, request)
+            quota_cost = image_quota_cost_for_payload(image_policy_payload)
+            image_policy_payload["quota_cost"] = quota_cost
+            consume_user_quota(identity, quota_cost)
             return StreamingResponse(_stream_image(body, identity, image_policy_payload), media_type="text/event-stream")
         # 入口处预扣 1 份对话额度；任一档（日 / 月 / 总）不足都直接 402。
         # 上游真失败（一个字未吐出）时由 _stream 内部退回。

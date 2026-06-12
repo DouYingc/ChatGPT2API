@@ -29,10 +29,10 @@ const SIZE_OPTIONS: SizeOption[] = [
 
 type ResolutionOption = { value: string; label: string; desc: string };
 const RESOLUTION_OPTIONS: ResolutionOption[] = [
-  { value: "", label: "自动", desc: "由上游决定" },
-  { value: "1k", label: "1K", desc: "约 1024px" },
-  { value: "2k", label: "2K", desc: "约 2048px" },
-  { value: "4k", label: "4K", desc: "尽量超清" },
+  { value: "", label: "自动", desc: "扣 1 额度" },
+  { value: "1k", label: "1K", desc: "扣 1 额度" },
+  { value: "2k", label: "2K", desc: "扣 2 额度" },
+  { value: "4k", label: "4K", desc: "扣 3 额度" },
 ];
 
 const TEXTAREA_MIN_HEIGHT = 96;
@@ -373,6 +373,13 @@ export function ImageComposer({
             />
 
             <div className="rounded-b-[24px] border-t border-stone-100 bg-white px-3 pb-3 pt-2 sm:border-t-0 sm:px-6 sm:pb-5 sm:pt-3" onClick={(event) => event.stopPropagation()}>
+              <div className="mb-2 flex flex-wrap items-center gap-1.5 text-[11px] text-stone-500">
+                <span className="font-medium text-stone-600">额度规则</span>
+                <span className="rounded-md bg-stone-100 px-1.5 py-0.5 font-data">1K=1</span>
+                <span className="rounded-md bg-stone-100 px-1.5 py-0.5 font-data">2K=2</span>
+                <span className="rounded-md bg-stone-100 px-1.5 py-0.5 font-data">4K=3</span>
+                <span className="text-stone-400">失败自动返还</span>
+              </div>
               <div className="flex items-end justify-between gap-2 sm:gap-3">
                 <div className="hide-scrollbar flex min-w-0 flex-1 flex-nowrap items-center gap-1.5 overflow-x-auto pb-0.5 sm:flex-wrap sm:gap-3 sm:overflow-visible sm:pb-0">
                   <button
@@ -623,6 +630,7 @@ export function ImageComposer({
                         {RESOLUTION_OPTIONS.map((option) => {
                           const active = option.value === imageResolution;
                           const disabled = isResolutionDisabled(option.value);
+                          const desc = disabled ? `兑换后解锁 · ${option.desc}` : option.desc;
                           return (
                             <button
                               key={option.label}
@@ -657,7 +665,7 @@ export function ImageComposer({
                                     active ? "text-white/70" : "text-stone-400",
                                   )}
                                 >
-                                  {option.desc}
+                                  {desc}
                                 </span>
                               </span>
                               {active ? <Check className="size-3.5 shrink-0" /> : null}

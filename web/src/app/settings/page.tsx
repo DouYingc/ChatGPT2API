@@ -9,6 +9,7 @@ import { BackupSettingsCard } from "./components/backup-settings-card";
 import { CPAPoolDialog } from "./components/cpa-pool-dialog";
 import { CPAPoolsCard } from "./components/cpa-pools-card";
 import { FloatingSaveBar } from "./components/floating-save-bar";
+import { HighResRelaysCard } from "./components/high-res-relays-card";
 import { ImportBrowserDialog } from "./components/import-browser-dialog";
 import { Section } from "./components/section";
 import { SettingsHeader } from "./components/settings-header";
@@ -33,6 +34,7 @@ const SECTIONS: Array<TOCItem & { description: string }> = [
   { id: "account", label: "账号与身份", description: "账号刷新策略与自动维护开关。用户密钥分发请前往「用户密钥」页。" },
   { id: "network", label: "网络", description: "全局代理：同时影响生图请求和 OpenAI 上游转发。" },
   { id: "images", label: "图片", description: "访问地址、生成超时、并发上限、过期清理及保护策略。" },
+  { id: "high-res-relays", label: "中转接口", description: "2K/4K 生图专用的 OpenAI 兼容接口池。" },
   { id: "security", label: "内容安全", description: "敏感词与全局附加指令——把审查放在请求落到生图账号之前。" },
   { id: "ai-review", label: "AI 审核", description: "用一个独立模型对用户提示词做合规判断，命中即拒绝。" },
   { id: "logs", label: "日志", description: "控制台输出级别。debug 仅排查问题时打开。" },
@@ -91,6 +93,8 @@ function SectionBody({ id }: { id: string }) {
       return <NetworkSection />;
     case "images":
       return <ImageSection />;
+    case "high-res-relays":
+      return <HighResRelaysCard />;
     case "security":
       return <SecuritySection />;
     case "ai-review":

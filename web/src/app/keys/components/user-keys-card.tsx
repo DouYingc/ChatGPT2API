@@ -300,6 +300,8 @@ export function UserKeysCard() {
 
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [name, setName] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [customKey, setCustomKey] = useState("");
   const [accountTier, setAccountTier] = useState<AccountTier>("free");
   const [createForm, setCreateForm] = useState<CreateFormState>(defaultCreateForm);
@@ -309,6 +311,8 @@ export function UserKeysCard() {
   const [deletingItem, setDeletingItem] = useState<UserKey | null>(null);
   const [editingItem, setEditingItem] = useState<UserKey | null>(null);
   const [editName, setEditName] = useState("");
+  const [editUsername, setEditUsername] = useState("");
+  const [editPassword, setEditPassword] = useState("");
   const [editKey, setEditKey] = useState("");
   const [editAccountTier, setEditAccountTier] = useState<AccountTier>("free");
   const [editForm, setEditForm] = useState<EditFormState | null>(null);
@@ -348,7 +352,10 @@ export function UserKeysCard() {
 
   const filteredItems = useMemo(() => {
     if (!debouncedQuery) return items;
-    return items.filter((item) => item.name.toLowerCase().includes(debouncedQuery));
+    return items.filter((item) => {
+      const username = String(item.username || "").toLowerCase();
+      return item.name.toLowerCase().includes(debouncedQuery) || username.includes(debouncedQuery);
+    });
   }, [items, debouncedQuery]);
 
   const pageCount = Math.max(1, Math.ceil(filteredItems.length / Number(pageSize)));
@@ -399,7 +406,18 @@ export function UserKeysCard() {
       toast.error(quotaError);
       return;
     }
+    const trimmedUsername = username.trim();
+    if (password && !trimmedUsername) {
+      toast.error("设置初始密码前需要先填写登录账号");
+      return;
+    }
+    if (password && password.length < 6) {
+      toast.error("密码至少需要 6 个字符");
+      return;
+    }
     const payload: UserKeyCreatePayload = { name: name.trim(), account_tier: accountTier };
+    if (trimmedUsername) payload.username = trimmedUsername;
+    if (password) payload.password = password;
     const trimmedKey = customKey.trim();
     if (trimmedKey) payload.key = trimmedKey;
     const view = payload as Record<string, unknown>;
@@ -414,6 +432,8 @@ export function UserKeysCard() {
       setItems(data.items);
       setRevealedKey(data.key);
       setName("");
+      setUsername("");
+      setPassword("");
       setCustomKey("");
       setAccountTier("free");
       setCreateForm(defaultCreateForm());
@@ -467,6 +487,8 @@ export function UserKeysCard() {
   const openEditDialog = (item: UserKey) => {
     setEditingItem(item);
     setEditName(item.name);
+    setEditUsername(String(item.username || ""));
+    setEditPassword("");
     setEditKey("");
     setEditAccountTier(item.account_tier ?? "free");
     setEditForm(buildEditForm(item));
@@ -474,6 +496,8 @@ export function UserKeysCard() {
 
   const closeEditDialog = () => {
     setEditingItem(null);
+    setEditUsername("");
+    setEditPassword("");
     setEditKey("");
     setEditAccountTier("free");
     setEditForm(null);
@@ -483,10 +507,23 @@ export function UserKeysCard() {
     if (!editingItem || !editForm) return;
     const item = editingItem;
     const trimmedName = editName.trim();
+    const trimmedUsername = editUsername.trim();
     const trimmedKey = editKey.trim();
     const payload: UserKeyUpdatePayload = {};
     const view = payload as Record<string, unknown>;
     if (trimmedName !== item.name) payload.name = trimmedName;
+    if (trimmedUsername !== String(item.username || "")) payload.username = trimmedUsername;
+    if (editPassword) {
+      if (!trimmedUsername) {
+        toast.error("重置密码前需要先填写登录账号");
+        return;
+      }
+      if (editPassword.length < 6) {
+        toast.error("密码至少需要 6 个字符");
+        return;
+      }
+      payload.password = editPassword;
+    }
     if (trimmedKey) payload.key = trimmedKey;
     if (editAccountTier !== (item.account_tier ?? "free")) payload.account_tier = editAccountTier;
 
@@ -568,7 +605,13 @@ export function UserKeysCard() {
       }
     }
 
-    if (!payload.name && !payload.key && !payload.account_tier && !quotaTouched) {
+    const hasProfileChange =
+      "name" in payload ||
+      "username" in payload ||
+      "password" in payload ||
+      "key" in payload ||
+      "account_tier" in payload;
+    if (!hasProfileChange && !quotaTouched) {
       // 真没改任何东西：静默关闭，不打扰用户。
       // 上面如果只是覆盖模式输入了与当前值相同的数字，也会落到这里——这是预期行为。
       closeEditDialog();
@@ -618,7 +661,7 @@ export function UserKeysCard() {
                     // 搜索条件改变即回到首页，避免在第 N 页搜出 1 条结果只能看到空白。
                     setPage(1);
                   }}
-                  placeholder="按名称搜索"
+                  placeholder="按名称或账号搜索"
                   className="h-9 w-full rounded-xl border-stone-200 bg-white/85 pl-10"
                 />
               </div>
@@ -661,7 +704,7 @@ export function UserKeysCard() {
                   <table className="w-full min-w-[1040px] text-left">
                     <thead className="border-b border-stone-200 bg-stone-50 text-[12px] font-medium text-stone-500">
                       <tr>
-                        <th className="w-56 px-4 py-2.5 font-medium">名称</th>
+                        <th className="w-56 px-4 py-2.5 font-medium">用户</th>
                         <th className="w-24 px-4 py-2.5 font-medium">状态</th>
                         <th className="w-72 px-4 py-2.5 font-medium">画图额度</th>
                         <th className="w-72 px-4 py-2.5 font-medium">对话额度</th>
@@ -786,6 +829,8 @@ export function UserKeysCard() {
           setIsDialogOpen(open);
           if (!open) {
             setName("");
+            setUsername("");
+            setPassword("");
             setCustomKey("");
             setAccountTier("free");
             setCreateForm(defaultCreateForm());
@@ -809,8 +854,8 @@ export function UserKeysCard() {
           <div className="max-h-[calc(90vh-154px)] overflow-y-auto px-6 py-5 sm:px-7">
             <div className="space-y-5">
               <section className="space-y-4">
-                <SectionHeading title="密钥档案" hint="名称用于后台识别；自定义密钥留空时自动生成。" />
-                <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_340px]">
+                <SectionHeading title="密钥档案" hint="名称用于后台识别；登录账号用于账号密码登录。" />
+                <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_340px]">
                   <div className="space-y-2">
                     <label className="text-xs font-semibold tracking-wide text-stone-500 uppercase">名称</label>
                     <Input
@@ -820,7 +865,26 @@ export function UserKeysCard() {
                       className="h-12 rounded-2xl border-stone-200 bg-white shadow-none"
                     />
                   </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold tracking-wide text-stone-500 uppercase">登录账号</label>
+                    <Input
+                      value={username}
+                      onChange={(event) => setUsername(event.target.value)}
+                      placeholder="例如：designer-a"
+                      className="h-12 rounded-2xl border-stone-200 bg-white shadow-none"
+                    />
+                  </div>
                   <AccountTierSelect value={accountTier} onChange={setAccountTier} />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs font-semibold tracking-wide text-stone-500 uppercase">初始密码</label>
+                  <Input
+                    type="password"
+                    value={password}
+                    onChange={(event) => setPassword(event.target.value)}
+                    placeholder="至少 6 个字符；留空则只创建密钥"
+                    className="h-12 rounded-2xl border-stone-200 bg-white shadow-none"
+                  />
                 </div>
                 <div className="space-y-2">
                   <label className="text-xs font-semibold tracking-wide text-stone-500 uppercase">自定义密钥</label>
@@ -928,7 +992,7 @@ export function UserKeysCard() {
             <div className="space-y-5">
               <section className="space-y-4">
                 <SectionHeading title="密钥档案" hint={editingItem ? `ID ${editingItem.id}` : "基础信息"} />
-                <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_340px]">
+                <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_340px]">
                   <div className="space-y-2">
                     <label className="text-xs font-semibold tracking-wide text-stone-500 uppercase">名称</label>
                     <Input
@@ -938,7 +1002,26 @@ export function UserKeysCard() {
                       className="h-12 rounded-2xl border-stone-200 bg-white shadow-none"
                     />
                   </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold tracking-wide text-stone-500 uppercase">登录账号</label>
+                    <Input
+                      value={editUsername}
+                      onChange={(event) => setEditUsername(event.target.value)}
+                      placeholder="例如：designer-a"
+                      className="h-12 rounded-2xl border-stone-200 bg-white shadow-none"
+                    />
+                  </div>
                   <AccountTierSelect value={editAccountTier} onChange={setEditAccountTier} />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs font-semibold tracking-wide text-stone-500 uppercase">重置密码</label>
+                  <Input
+                    type="password"
+                    value={editPassword}
+                    onChange={(event) => setEditPassword(event.target.value)}
+                    placeholder={editingItem?.has_password ? "留空则不修改密码" : "至少 6 个字符"}
+                    className="h-12 rounded-2xl border-stone-200 bg-white shadow-none"
+                  />
                 </div>
               </section>
               {editingItem && editForm ? (
@@ -1083,7 +1166,21 @@ function KeyRow({
             {accountTierLabel(item.account_tier)}
           </Badge>
         </div>
-        <div className="mt-0.5 font-data text-[11px] text-stone-400">ID {item.id}</div>
+        <div className="mt-1 flex flex-wrap items-center gap-1.5 font-data text-[11px] text-stone-400">
+          <span>ID {item.id}</span>
+          <span>·</span>
+          <span>{item.username ? `@${item.username}` : "未设置账号"}</span>
+          {item.username ? (
+            <span
+              className={cn(
+                "rounded px-1 py-0.5 text-[10px] font-medium",
+                item.has_password ? "bg-emerald-50 text-emerald-700" : "bg-stone-100 text-stone-500",
+              )}
+            >
+              {item.has_password ? "有密码" : "无密码"}
+            </span>
+          ) : null}
+        </div>
       </td>
       <td className="px-4 py-3">
         <Badge variant={item.enabled ? "success" : "secondary"} className="rounded-md">

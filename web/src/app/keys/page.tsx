@@ -4,6 +4,8 @@ import { LoaderCircle } from "lucide-react";
 
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
+import { RedeemCodesCard } from "./components/redeem-codes-card";
+import { QuotaLedgerCard } from "./components/quota-ledger-card";
 import { UserKeysCard } from "./components/user-keys-card";
 
 function KeysPageContent() {
@@ -23,8 +25,10 @@ function KeysPageContent() {
           </p>
         </div>
       </section>
-      <section className="pb-12">
+      <section className="space-y-5 pb-12">
         <UserKeysCard />
+        <QuotaLedgerCard />
+        <RedeemCodesCard />
       </section>
     </>
   );

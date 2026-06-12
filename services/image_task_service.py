@@ -53,6 +53,13 @@ def _clean(value: object, default: str = "") -> str:
     return str(value or default).strip()
 
 
+def _quota_cost(value: object) -> int:
+    try:
+        return max(1, int(value or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
 def _owner_id(identity: dict[str, object]) -> str:
     return _clean(identity.get("id")) or "anonymous"
 
@@ -71,7 +78,37 @@ def _collect_image_urls(data: list[Any]) -> list[str]:
     return urls
 
 
-def _public_task(task: dict[str, Any]) -> dict[str, Any]:
+def _should_hide_user_error(message: str) -> bool:
+    normalized = message.lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "高清中转接口调用失败",
+            "中转接口调用失败",
+            "duck:",
+            "und_err_socket",
+            "socketerror",
+            "remotedisconnected",
+            "connection closed",
+            "connection aborted",
+            "fetch failed",
+            "curl:",
+            "status_code=500",
+            "traceid:",
+        )
+    )
+
+
+def _public_error(task: dict[str, Any], *, sanitize_errors: bool) -> str:
+    message = _clean(task.get("error"))
+    if not sanitize_errors or not message:
+        return message
+    if _should_hide_user_error(message):
+        return "接口繁忙，请稍后重试"
+    return message
+
+
+def _public_task(task: dict[str, Any], *, sanitize_errors: bool = False) -> dict[str, Any]:
     item = {
         "id": task.get("id"),
         "status": task.get("status"),
@@ -84,8 +121,9 @@ def _public_task(task: dict[str, Any]) -> dict[str, Any]:
     }
     if task.get("data") is not None:
         item["data"] = task.get("data")
-    if task.get("error"):
-        item["error"] = task.get("error")
+    error = _public_error(task, sanitize_errors=sanitize_errors)
+    if error:
+        item["error"] = error
     return item
 
 
@@ -124,6 +162,7 @@ class ImageTaskService:
         resolution: str | None = None,
         plan_type: str | None = None,
         allowed_plan_types: object = None,
+        quota_cost: int = 1,
     ) -> dict[str, Any]:
         payload = {
             "prompt": prompt,
@@ -135,6 +174,7 @@ class ImageTaskService:
             "allowed_plan_types": allowed_plan_types,
             "response_format": "url",
             "base_url": base_url,
+            "quota_cost": _quota_cost(quota_cost),
         }
         return self._submit(identity, client_task_id=client_task_id, mode="generate", payload=payload)
 
@@ -151,6 +191,7 @@ class ImageTaskService:
         resolution: str | None = None,
         plan_type: str | None = None,
         allowed_plan_types: object = None,
+        quota_cost: int = 1,
     ) -> dict[str, Any]:
         payload = {
             "prompt": prompt,
@@ -163,11 +204,13 @@ class ImageTaskService:
             "allowed_plan_types": allowed_plan_types,
             "response_format": "url",
             "base_url": base_url,
+            "quota_cost": _quota_cost(quota_cost),
         }
         return self._submit(identity, client_task_id=client_task_id, mode="edit", payload=payload)
 
     def list_tasks(self, identity: dict[str, object], task_ids: list[str]) -> dict[str, Any]:
         owner = _owner_id(identity)
+        sanitize_errors = str(identity.get("role") or "").strip().lower() != "admin"
         requested_ids = [_clean(task_id) for task_id in task_ids if _clean(task_id)]
         with self._lock:
             if self._cleanup_locked():
@@ -179,10 +222,10 @@ class ImageTaskService:
                 if task is None:
                     missing_ids.append(task_id)
                 else:
-                    items.append(_public_task(task))
+                    items.append(_public_task(task, sanitize_errors=sanitize_errors))
             if not requested_ids:
                 items = [
-                    _public_task(task)
+                    _public_task(task, sanitize_errors=sanitize_errors)
                     for task in self._tasks.values()
                     if task.get("owner_id") == owner
                 ]
@@ -197,12 +240,13 @@ class ImageTaskService:
         - running: 置为 canceled，工作线程会在请求结束后丢弃结果而不写入
         - 终态(success/error/canceled): 不动
 
-        每条真正被取消（queued / running 翻 canceled）的任务都退还 1 张入口预扣额度。
+        每条真正被取消（queued / running 翻 canceled）的任务都退还入口预扣额度。
         终态条目不退——success 已经出图了不能扣回去，error/canceled 已经退过了。
         """
         owner = _owner_id(identity)
         requested_ids = [_clean(task_id) for task_id in task_ids if _clean(task_id)]
         canceled: list[str] = []
+        refund_amounts: list[int] = []
         skipped: list[str] = []
         missing_ids: list[str] = []
         with self._lock:
@@ -219,17 +263,18 @@ class ImageTaskService:
                 task["error"] = "已取消"
                 task["updated_at"] = _now_iso()
                 canceled.append(task_id)
+                refund_amounts.append(_quota_cost(task.get("quota_cost")))
             if canceled:
                 self._save_locked()
         # 退款放到锁外做：DataStore / DB 写盘期间不持有 self._lock，
         # 避免与 _run_task 失败分支同时拿锁形成竞态。
-        for _ in canceled:
-            self._refund_one(identity)
+        for amount in refund_amounts:
+            self._refund_one(identity, amount)
         return {"canceled": canceled, "skipped": skipped, "missing_ids": missing_ids}
 
-    def _refund_one(self, identity: dict[str, object]) -> None:
-        """退还 1 张入口预扣额度。
-        admin / unlimited / 匿名身份内部 noop；普通用户的 used 减 1 不会跌破 0。
+    def _refund_one(self, identity: dict[str, object], amount: int = 1) -> None:
+        """退还入口预扣额度。
+        admin / unlimited / 匿名身份内部 noop；普通用户的 used 回退对应额度且不会跌破 0。
         所有异常吞掉——退款失败不该影响主流程的错误响应。
         """
         role = str(identity.get("role") or "").strip().lower()
@@ -239,7 +284,7 @@ class ImageTaskService:
         try:
             # 延迟 import 避免 services 间循环引用
             from services.auth_service import auth_service
-            auth_service.refund_quota(item_id, 1)
+            auth_service.refund_quota(item_id, _quota_cost(amount))
         except Exception:
             pass
 
@@ -255,6 +300,7 @@ class ImageTaskService:
         if not task_id:
             raise ValueError("client_task_id is required")
         owner = _owner_id(identity)
+        sanitize_errors = str(identity.get("role") or "").strip().lower() != "admin"
         key = _task_key(owner, task_id)
         now = _now_iso()
         should_start = False
@@ -264,7 +310,7 @@ class ImageTaskService:
             if task is not None:
                 if cleaned:
                     self._save_locked()
-                return _public_task(task)
+                return _public_task(task, sanitize_errors=sanitize_errors)
             task = {
                 "id": task_id,
                 "owner_id": owner,
@@ -273,6 +319,7 @@ class ImageTaskService:
                 "model": _clean(payload.get("model"), "gpt-image-2"),
                 "size": _clean(payload.get("size")),
                 "resolution": _clean(payload.get("resolution")),
+                "quota_cost": _quota_cost(payload.get("quota_cost")),
                 "created_at": now,
                 "updated_at": now,
             }
@@ -288,7 +335,7 @@ class ImageTaskService:
                 daemon=True,
             )
             thread.start()
-        return _public_task(task)
+        return _public_task(task, sanitize_errors=sanitize_errors)
 
     def _run_task(
         self,
@@ -349,9 +396,9 @@ class ImageTaskService:
                     return
             error_message = str(exc) or "image task failed"
             self._update_task(key, status=TASK_STATUS_ERROR, error=error_message, data=[])
-            # 上游真失败：退还入口预扣的 1 张额度。
-            # admin / unlimited 在 _refund_one 内部 noop；普通用户的 used 减 1 不会跌破 0。
-            self._refund_one(identity)
+            # 上游真失败：退还入口预扣额度。
+            # admin / unlimited 在 _refund_one 内部 noop；普通用户的 used 回退对应额度且不会跌破 0。
+            self._refund_one(identity, _quota_cost(payload.get("quota_cost")))
             self._log_call(
                 identity,
                 mode,
@@ -446,6 +493,7 @@ class ImageTaskService:
                 "model": _clean(item.get("model"), "gpt-image-2"),
                 "size": _clean(item.get("size")),
                 "resolution": _clean(item.get("resolution")),
+                "quota_cost": _quota_cost(item.get("quota_cost")),
                 "created_at": _clean(item.get("created_at"), _now_iso()),
                 "updated_at": _clean(item.get("updated_at"), _clean(item.get("created_at"), _now_iso())),
             }

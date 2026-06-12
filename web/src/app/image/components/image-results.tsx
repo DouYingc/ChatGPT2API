@@ -581,6 +581,9 @@ export function ImageResults({
                                 </span>
                               </div>
                               <ErrorMessageBlock message={errorMessage} />
+                              <p className="text-center text-[11px] leading-4 text-stone-500 sm:text-[12px] sm:leading-5">
+                                失败任务不会扣额度，预扣额度已自动返还。
+                              </p>
                               <div className="flex flex-wrap items-center justify-center gap-1.5">
                                 <button
                                   type="button"

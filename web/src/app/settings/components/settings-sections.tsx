@@ -32,10 +32,15 @@ export function AccountSection() {
   const setRefreshAccountIntervalMinute = useSettingsStore((s) => s.setRefreshAccountIntervalMinute);
   const setAutoRemoveInvalidAccounts = useSettingsStore((s) => s.setAutoRemoveInvalidAccounts);
   const setAutoRemoveRateLimitedAccounts = useSettingsStore((s) => s.setAutoRemoveRateLimitedAccounts);
+  const setRegisterDefaultQuota = useSettingsStore((s) => s.setRegisterDefaultQuota);
+  const setRegisterDefaultUnlimited = useSettingsStore((s) => s.setRegisterDefaultUnlimited);
+  const setRegisterIpDailyLimit = useSettingsStore((s) => s.setRegisterIpDailyLimit);
+  const setImageIpMinuteLimit = useSettingsStore((s) => s.setImageIpMinuteLimit);
+  const registerDefaults = config?.register_defaults;
 
   return (
-    <div className="grid gap-4 md:grid-cols-2">
-      <div className="space-y-2 md:col-span-2">
+    <div className="space-y-5">
+      <div className="space-y-2">
         <label className={LABEL_CLASS}>账号刷新间隔（分钟）</label>
         <Input
           value={String(config?.refresh_account_interval_minute || "")}
@@ -45,20 +50,95 @@ export function AccountSection() {
         />
         <p className={HELP_CLASS}>控制账号自动刷新频率。</p>
       </div>
-      <label className={`flex items-center gap-3 ${TILE_CLASS} text-sm text-stone-700`}>
-        <Checkbox
-          checked={Boolean(config?.auto_remove_invalid_accounts)}
-          onCheckedChange={(c) => setAutoRemoveInvalidAccounts(Boolean(c))}
-        />
-        自动移除异常账号
-      </label>
-      <label className={`flex items-center gap-3 ${TILE_CLASS} text-sm text-stone-700`}>
-        <Checkbox
-          checked={Boolean(config?.auto_remove_rate_limited_accounts)}
-          onCheckedChange={(c) => setAutoRemoveRateLimitedAccounts(Boolean(c))}
-        />
-        自动移除限流账号
-      </label>
+
+      <div className="space-y-3 rounded-xl border border-stone-200 bg-stone-50/60 p-4">
+        <div>
+          <div className="text-sm font-semibold text-stone-900">新用户默认额度</div>
+          <p className={HELP_CLASS}>用户注册后立即生效；已注册用户不受这里影响。</p>
+        </div>
+        <div className="grid gap-4 md:grid-cols-2">
+          <div className="space-y-2">
+            <label className={LABEL_CLASS}>画图总额度</label>
+            <Input
+              value={String(registerDefaults?.image_total_quota ?? 100)}
+              onChange={(e) => setRegisterDefaultQuota("image_total_quota", e.target.value)}
+              disabled={Boolean(registerDefaults?.image_total_unlimited)}
+              placeholder="100"
+              className={INPUT_CLASS}
+            />
+          </div>
+          <div className="space-y-2">
+            <label className={LABEL_CLASS}>对话总额度</label>
+            <Input
+              value={String(registerDefaults?.chat_total_quota ?? 0)}
+              onChange={(e) => setRegisterDefaultQuota("chat_total_quota", e.target.value)}
+              disabled={Boolean(registerDefaults?.chat_total_unlimited ?? true)}
+              placeholder="0"
+              className={INPUT_CLASS}
+            />
+          </div>
+        </div>
+        <div className="grid gap-3 md:grid-cols-2">
+          <label className={`flex items-center gap-3 ${TILE_CLASS} text-sm text-stone-700`}>
+            <Checkbox
+              checked={Boolean(registerDefaults?.image_total_unlimited)}
+              onCheckedChange={(c) => setRegisterDefaultUnlimited("image_total_unlimited", Boolean(c))}
+            />
+            新用户画图不限总额度
+          </label>
+          <label className={`flex items-center gap-3 ${TILE_CLASS} text-sm text-stone-700`}>
+            <Checkbox
+              checked={Boolean(registerDefaults?.chat_total_unlimited ?? true)}
+              onCheckedChange={(c) => setRegisterDefaultUnlimited("chat_total_unlimited", Boolean(c))}
+            />
+            新用户对话不限总额度
+          </label>
+        </div>
+      </div>
+
+      <div className="space-y-3 rounded-xl border border-stone-200 bg-stone-50/60 p-4">
+        <div>
+          <div className="text-sm font-semibold text-stone-900">防刷限制</div>
+          <p className={HELP_CLASS}>填 0 表示关闭对应限制。限制触发时不会扣用户额度。</p>
+        </div>
+        <div className="grid gap-4 md:grid-cols-2">
+          <div className="space-y-2">
+            <label className={LABEL_CLASS}>同 IP 每日注册上限</label>
+            <Input
+              value={String(config?.register_ip_daily_limit ?? 3)}
+              onChange={(e) => setRegisterIpDailyLimit(e.target.value)}
+              placeholder="3"
+              className={INPUT_CLASS}
+            />
+          </div>
+          <div className="space-y-2">
+            <label className={LABEL_CLASS}>同 IP 每分钟生图上限</label>
+            <Input
+              value={String(config?.image_ip_minute_limit ?? 10)}
+              onChange={(e) => setImageIpMinuteLimit(e.target.value)}
+              placeholder="10"
+              className={INPUT_CLASS}
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2">
+        <label className={`flex items-center gap-3 ${TILE_CLASS} text-sm text-stone-700`}>
+          <Checkbox
+            checked={Boolean(config?.auto_remove_invalid_accounts)}
+            onCheckedChange={(c) => setAutoRemoveInvalidAccounts(Boolean(c))}
+          />
+          自动移除异常账号
+        </label>
+        <label className={`flex items-center gap-3 ${TILE_CLASS} text-sm text-stone-700`}>
+          <Checkbox
+            checked={Boolean(config?.auto_remove_rate_limited_accounts)}
+            onCheckedChange={(c) => setAutoRemoveRateLimitedAccounts(Boolean(c))}
+          />
+          自动移除限流账号
+        </label>
+      </div>
     </div>
   );
 }

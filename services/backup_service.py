@@ -627,8 +627,11 @@ class BackupService:
                 self._add_file_to_archive(archive, DATA_DIR / "cpa_config.json", "data/cpa_config.json")
             if include.get("sub2api"):
                 self._add_file_to_archive(archive, DATA_DIR / "sub2api_config.json", "data/sub2api_config.json")
+            if include.get("high_res_relays"):
+                self._add_file_to_archive(archive, DATA_DIR / "high_res_image_relays.json", "data/high_res_image_relays.json")
             if include.get("logs"):
                 self._add_file_to_archive(archive, DATA_DIR / "logs.jsonl", "data/logs.jsonl")
+                self._add_file_to_archive(archive, DATA_DIR / "quota_ledger.json", "data/quota_ledger.json")
             if include.get("image_tasks"):
                 self._add_file_to_archive(archive, DATA_DIR / "image_tasks.json", "data/image_tasks.json")
             if include.get("accounts_snapshot"):
