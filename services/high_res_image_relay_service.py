@@ -446,6 +446,9 @@ class HighResImageRelayService:
 
     def _session(self) -> curl_requests.Session:
         session_kwargs: dict[str, object] = {"impersonate": "chrome", "verify": True}
+        proxy = _outbound_proxy()
+        if proxy:
+            session_kwargs["proxy"] = proxy
         session = curl_requests.Session(**session_kwargs)
         session.headers.update({
             "User-Agent": (
@@ -732,6 +735,7 @@ class HighResImageRelayService:
             "apiKey": _clean(relay.get("api_key")),
             "body": body,
             "timeoutMs": HIGH_RES_RELAY_TIMEOUT_SECONDS * 1000,
+            "proxy": _outbound_proxy(),
         }
         try:
             completed = subprocess.run(
@@ -763,6 +767,7 @@ class HighResImageRelayService:
                 _clean(result.get("errorName")),
                 _clean(result.get("causeCode")),
                 _clean(result.get("cause")),
+                f"proxy_used={bool(result.get('proxyUsed'))}",
             ]
             raise RuntimeError(" / ".join(part for part in parts if part))
         if not bool(result.get("ok")):

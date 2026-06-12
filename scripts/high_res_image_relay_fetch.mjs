@@ -1,3 +1,7 @@
+import http from "node:http";
+import https from "node:https";
+import tls from "node:tls";
+
 const chunks = [];
 
 for await (const chunk of process.stdin) {
@@ -9,6 +13,95 @@ function write(payload) {
 }
 
 const startedAt = Date.now();
+let proxyUsed = false;
+
+class HttpProxyAgent extends https.Agent {
+  constructor(proxyUrl) {
+    super({ keepAlive: false });
+    this.proxyUrl = new URL(proxyUrl);
+  }
+
+  createConnection(options, callback) {
+    const targetHost = String(options.host || options.hostname || "");
+    const targetPort = Number(options.port || 443);
+    let done = false;
+    const finish = (error, socket) => {
+      if (done) return;
+      done = true;
+      callback(error, socket);
+    };
+    const connectReq = http.request({
+      host: this.proxyUrl.hostname,
+      port: Number(this.proxyUrl.port || 80),
+      method: "CONNECT",
+      path: `${targetHost}:${targetPort}`,
+      headers: {
+        Host: `${targetHost}:${targetPort}`,
+      },
+    });
+
+    connectReq.once("connect", (res, socket) => {
+      if (res.statusCode !== 200) {
+        socket.destroy();
+        finish(new Error(`Proxy CONNECT failed: HTTP ${res.statusCode}`));
+        return;
+      }
+      const tlsSocket = tls.connect({ socket, servername: targetHost });
+      tlsSocket.once("secureConnect", () => finish(null, tlsSocket));
+      tlsSocket.once("error", (error) => finish(error));
+    });
+    connectReq.once("error", (error) => finish(error));
+    connectReq.end();
+  }
+}
+
+function requestWithHttps(input, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const targetUrl = new URL(input.url);
+    const body = JSON.stringify(input.body || {});
+    const proxy = String(input.proxy || "").trim();
+    const options = {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${input.apiKey}`,
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body),
+      },
+      timeout: timeoutMs,
+      agent: proxy ? new HttpProxyAgent(proxy) : undefined,
+    };
+    const req = https.request(targetUrl, options, (response) => {
+      const responseChunks = [];
+      response.on("data", (chunk) => responseChunks.push(chunk));
+      response.once("end", () => {
+        const text = Buffer.concat(responseChunks).toString("utf8");
+        let json = null;
+        if (text) {
+          try {
+            json = JSON.parse(text);
+          } catch {
+            json = null;
+          }
+        }
+        resolve({
+          ok: response.statusCode >= 200 && response.statusCode < 300,
+          status: response.statusCode || 0,
+          statusText: response.statusMessage || "",
+          contentType: response.headers["content-type"] || "",
+          json,
+          text: json === null ? text : "",
+          durationMs: Date.now() - startedAt,
+          proxyUsed: Boolean(proxy),
+        });
+      });
+    });
+    req.once("timeout", () => {
+      req.destroy(new Error("request timeout"));
+    });
+    req.once("error", reject);
+    req.end(body);
+  });
+}
 
 try {
   const input = JSON.parse(Buffer.concat(chunks).toString("utf8"));
@@ -17,37 +110,44 @@ try {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(input.url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${input.apiKey}`,
-        "Content-Type": "application/json",
-      },
-      cache: "no-store",
-      body: JSON.stringify(input.body || {}),
-      signal: controller.signal,
-    });
+    const proxy = String(input.proxy || "").trim();
+    if (proxy) {
+      proxyUsed = true;
+      write(await requestWithHttps(input, timeoutMs));
+    } else {
+      const response = await fetch(input.url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${input.apiKey}`,
+          "Content-Type": "application/json",
+        },
+        cache: "no-store",
+        body: JSON.stringify(input.body || {}),
+        signal: controller.signal,
+      });
 
-    const contentType = response.headers.get("content-type") || "";
-    const text = await response.text();
-    let json = null;
-    if (text) {
-      try {
-        json = JSON.parse(text);
-      } catch {
-        json = null;
+      const contentType = response.headers.get("content-type") || "";
+      const text = await response.text();
+      let json = null;
+      if (text) {
+        try {
+          json = JSON.parse(text);
+        } catch {
+          json = null;
+        }
       }
-    }
 
-    write({
-      ok: response.ok,
-      status: response.status,
-      statusText: response.statusText,
-      contentType,
-      json,
-      text: json === null ? text : "",
-      durationMs: Date.now() - startedAt,
-    });
+      write({
+        ok: response.ok,
+        status: response.status,
+        statusText: response.statusText,
+        contentType,
+        json,
+        text: json === null ? text : "",
+        durationMs: Date.now() - startedAt,
+        proxyUsed,
+      });
+    }
   } finally {
     clearTimeout(timer);
   }
@@ -60,5 +160,6 @@ try {
     cause: error instanceof Error && error.cause ? String(error.cause) : "",
     causeCode: error instanceof Error && error.cause && typeof error.cause === "object" && "code" in error.cause ? String(error.cause.code) : "",
     durationMs: Date.now() - startedAt,
+    proxyUsed,
   });
 }
