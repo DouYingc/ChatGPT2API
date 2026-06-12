@@ -68,6 +68,9 @@ type AccountUpdateResponse = {
 export type SettingsConfig = {
   proxy: string;
   base_url?: string;
+  image_route_1k?: "pool" | "relay" | string;
+  image_route_2k?: "pool" | "relay" | string;
+  image_route_4k?: "pool" | "relay" | string;
   register_defaults?: RegisterDefaults;
   global_system_prompt?: string;
   sensitive_words?: string[];

@@ -36,6 +36,9 @@ export const PAGE_SIZE_OPTIONS = ["50", "100", "200"] as const;
 
 export type PageSizeOption = (typeof PAGE_SIZE_OPTIONS)[number];
 
+export type ImageRoute = "pool" | "relay";
+export type ImageRouteKey = "image_route_1k" | "image_route_2k" | "image_route_4k";
+
 const DEFAULT_REGISTER_DEFAULTS: RegisterDefaults = {
   image_daily_quota: 0,
   image_daily_unlimited: true,
@@ -67,6 +70,13 @@ function normalizeRegisterDefaults(value: SettingsConfig["register_defaults"]): 
     chat_total_quota: Number(source.chat_total_quota ?? DEFAULT_REGISTER_DEFAULTS.chat_total_quota),
     chat_total_unlimited: Boolean(source.chat_total_unlimited ?? DEFAULT_REGISTER_DEFAULTS.chat_total_unlimited),
   };
+}
+
+function normalizeImageRoute(value: unknown, fallback: ImageRoute): ImageRoute {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "pool") return "pool";
+  if (normalized === "relay") return "relay";
+  return fallback;
 }
 
 function normalizeConfig(config: SettingsConfig): SettingsConfig {
@@ -110,6 +120,9 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     image_ip_minute_limit: Number(config.image_ip_minute_limit ?? 10),
     high_res_relay_fail_threshold: Number(config.high_res_relay_fail_threshold ?? 3),
     high_res_relay_cooldown_seconds: Number(config.high_res_relay_cooldown_seconds ?? 300),
+    image_route_1k: normalizeImageRoute(config.image_route_1k, "pool"),
+    image_route_2k: normalizeImageRoute(config.image_route_2k, "relay"),
+    image_route_4k: normalizeImageRoute(config.image_route_4k, "relay"),
     auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
     auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
     log_levels: Array.isArray(config.log_levels) ? config.log_levels : [],
@@ -255,6 +268,7 @@ type SettingsStore = {
   setImageIpMinuteLimit: (value: string) => void;
   setHighResRelayFailThreshold: (value: string) => void;
   setHighResRelayCooldownSeconds: (value: string) => void;
+  setImageRoute: (key: ImageRouteKey, value: ImageRoute) => void;
   setAutoRemoveInvalidAccounts: (value: boolean) => void;
   setAutoRemoveRateLimitedAccounts: (value: boolean) => void;
   setRegisterDefaultQuota: (key: "image_total_quota" | "chat_total_quota", value: string) => void;
@@ -426,6 +440,9 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         image_ip_minute_limit: Math.max(0, Number(config.image_ip_minute_limit) || 0),
         high_res_relay_fail_threshold: Math.max(1, Number(config.high_res_relay_fail_threshold) || 3),
         high_res_relay_cooldown_seconds: Math.max(30, Number(config.high_res_relay_cooldown_seconds) || 300),
+        image_route_1k: normalizeImageRoute(config.image_route_1k, "pool"),
+        image_route_2k: normalizeImageRoute(config.image_route_2k, "relay"),
+        image_route_4k: normalizeImageRoute(config.image_route_4k, "relay"),
         auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
         auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
         register_defaults: {
@@ -521,6 +538,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setHighResRelayCooldownSeconds: (value) => {
     set((state) => state.config ? { config: { ...state.config, high_res_relay_cooldown_seconds: value }, isDirty: true } : {});
+  },
+
+  setImageRoute: (key, value) => {
+    set((state) => state.config ? { config: { ...state.config, [key]: value }, isDirty: true } : {});
   },
 
   setAutoRemoveInvalidAccounts: (value) => {

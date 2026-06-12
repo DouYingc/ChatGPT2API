@@ -255,7 +255,7 @@ def image_plan_candidates(request: "ConversationRequest") -> list[str | None]:
     if model_plan_type:
         return [model_plan_type]
     if normalize_image_resolution(request.resolution) in {"2k", "4k"}:
-        return ["Pro", "Plus", None]
+        return ["Pro", "Plus", "Team"]
     return [None]
 
 
@@ -986,11 +986,12 @@ def stream_high_res_relay_image_outputs(
         index: int,
         total: int,
 ) -> Iterator[ImageOutput]:
+    relay_resolution = normalize_image_resolution(request.resolution) or "1k"
     result = high_res_image_relay_service.generate(
         prompt=request.prompt,
         model=image_generation_model_for_tool(request.model),
         size=request.size,
-        resolution=normalize_image_resolution(request.resolution) or request.resolution,
+        resolution=relay_resolution,
         images=request.images or None,
     )
     data = format_image_result(
@@ -1022,9 +1023,11 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
     emitted = False
     last_error = ""
     normalized_resolution = normalize_image_resolution(request.resolution)
+    routing_resolution = normalized_resolution or "1k"
+    image_route = config.image_route_for_resolution(routing_resolution)
     high_resolution_requested = normalized_resolution in {"2k", "4k"}
     for index in range(1, request.n + 1):
-        if high_resolution_requested:
+        if image_route == "relay":
             try:
                 for output in stream_high_res_relay_image_outputs(request, index, request.n):
                     emitted = True
@@ -1033,15 +1036,17 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
             except Exception as exc:
                 last_error = str(exc)
                 logger.warning({
-                    "event": "high_res_image_relay_fail",
+                    "event": "image_relay_fail",
                     "model": request.model,
                     "requested_resolution": request.resolution or "",
+                    "routing_resolution": routing_resolution,
                     "requested_size": request.size or "",
+                    "image_route": image_route,
                     "error": last_error,
                 })
                 raise ImageGenerationError(
                     image_stream_error_message(last_error),
-                    code="high_resolution_relay_failed",
+                    code="high_resolution_relay_failed" if high_resolution_requested else "image_relay_failed",
                 ) from exc
         used_codex, codex_outputs = try_stream_codex_image_outputs_with_pool(request, index, request.n)
         if codex_outputs is not None:

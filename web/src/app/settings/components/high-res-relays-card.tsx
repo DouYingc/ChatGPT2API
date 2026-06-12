@@ -24,7 +24,7 @@ import {
   type HighResRelayTestResult,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { useSettingsStore } from "../store";
+import { useSettingsStore, type ImageRoute, type ImageRouteKey } from "../store";
 
 type RelayDraft = {
   name: string;
@@ -34,6 +34,17 @@ type RelayDraft = {
   mode: "images";
   enabled: boolean;
 };
+
+const IMAGE_ROUTE_CONTROLS: Array<{
+  key: ImageRouteKey;
+  label: string;
+  defaultRoute: ImageRoute;
+  poolLabel: string;
+}> = [
+  { key: "image_route_1k", label: "1K", defaultRoute: "pool", poolLabel: "号池" },
+  { key: "image_route_2k", label: "2K", defaultRoute: "relay", poolLabel: "Plus号池" },
+  { key: "image_route_4k", label: "4K", defaultRoute: "relay", poolLabel: "Plus号池" },
+];
 
 const EMPTY_DRAFT: RelayDraft = {
   name: "",
@@ -92,6 +103,7 @@ export function HighResRelaysCard() {
   const config = useSettingsStore((state) => state.config);
   const setHighResRelayFailThreshold = useSettingsStore((state) => state.setHighResRelayFailThreshold);
   const setHighResRelayCooldownSeconds = useSettingsStore((state) => state.setHighResRelayCooldownSeconds);
+  const setImageRoute = useSettingsStore((state) => state.setImageRoute);
   const [items, setItems] = useState<HighResRelay[]>([]);
   const [drafts, setDrafts] = useState<Record<string, RelayDraft>>({});
   const [newDraft, setNewDraft] = useState<RelayDraft>(EMPTY_DRAFT);
@@ -251,8 +263,49 @@ export function HighResRelaysCard() {
           </span>
         ) : null}
         <span className="text-xs text-stone-500">
-          2K/4K 请求只会使用启用且未暂停的 Images API 中转接口；自动/1K 仍走本地号池。
+          生图请求会按下方渠道策略选择号池或中转接口。
         </span>
+      </div>
+
+      <div className="rounded-xl border border-stone-200 bg-stone-50/60 p-4">
+        <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-stone-900">
+          <PlugZap className="size-4 text-stone-500" />
+          生成渠道
+        </div>
+        <div className="grid gap-3 md:grid-cols-3">
+          {IMAGE_ROUTE_CONTROLS.map((item) => {
+            const currentRoute = String(config?.[item.key] || item.defaultRoute) === "relay" ? "relay" : "pool";
+            return (
+              <div key={item.key} className="rounded-lg border border-stone-200 bg-white p-3">
+                <div className="mb-2 text-xs font-semibold text-stone-600">{item.label}</div>
+                <div className="grid grid-cols-2 gap-2">
+                  {([
+                    ["pool", item.poolLabel],
+                    ["relay", "中转"],
+                  ] as const).map(([route, label]) => (
+                    <Button
+                      key={route}
+                      type="button"
+                      variant="outline"
+                      className={cn(
+                        "h-9 rounded-lg border-stone-200 text-xs",
+                        currentRoute === route
+                          ? "border-stone-900 bg-stone-900 text-white hover:bg-stone-800 hover:text-white"
+                          : "bg-white text-stone-600 hover:bg-stone-50",
+                      )}
+                      onClick={() => setImageRoute(item.key, route)}
+                    >
+                      {label}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <p className="mt-2 text-xs text-stone-500">
+          2K/4K 选择 Plus号池时只会使用 Plus、Pro、Team 账号；选择中转时使用下方启用接口。
+        </p>
       </div>
 
       <div className="rounded-xl border border-stone-200 bg-stone-50/60 p-4">

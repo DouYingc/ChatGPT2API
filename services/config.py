@@ -44,6 +44,13 @@ DEFAULT_REGISTER_QUOTAS = {
     "chat_total_unlimited": True,
 }
 
+IMAGE_ROUTE_VALUES = {"pool", "relay"}
+DEFAULT_IMAGE_ROUTES = {
+    "1k": "pool",
+    "2k": "relay",
+    "4k": "relay",
+}
+
 
 def _normalize_bool(value: object, default: bool = False) -> bool:
     if isinstance(value, str):
@@ -63,6 +70,22 @@ def _normalize_positive_int(value: object, default: int, minimum: int = 0) -> in
     except (TypeError, ValueError):
         normalized = default
     return max(minimum, normalized)
+
+
+def _normalize_image_route(value: object, default: str = "pool") -> str:
+    normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "account": "pool",
+        "accounts": "pool",
+        "chatgpt": "pool",
+        "pool": "pool",
+        "plus_pool": "pool",
+        "relay": "relay",
+        "relays": "relay",
+        "proxy": "relay",
+        "upstream": "relay",
+    }
+    return aliases.get(normalized) or (default if default in IMAGE_ROUTE_VALUES else "pool")
 
 
 def _normalize_backup_include(value: object) -> dict[str, bool]:
@@ -298,6 +321,26 @@ class ConfigStore:
             return 300
 
     @property
+    def image_route_1k(self) -> str:
+        return _normalize_image_route(self.data.get("image_route_1k"), DEFAULT_IMAGE_ROUTES["1k"])
+
+    @property
+    def image_route_2k(self) -> str:
+        return _normalize_image_route(self.data.get("image_route_2k"), DEFAULT_IMAGE_ROUTES["2k"])
+
+    @property
+    def image_route_4k(self) -> str:
+        return _normalize_image_route(self.data.get("image_route_4k"), DEFAULT_IMAGE_ROUTES["4k"])
+
+    def image_route_for_resolution(self, resolution: object) -> str:
+        normalized = str(resolution or "").strip().lower().replace(" ", "").replace("-", "")
+        if normalized == "4k":
+            return self.image_route_4k
+        if normalized == "2k":
+            return self.image_route_2k
+        return self.image_route_1k
+
+    @property
     def auto_remove_invalid_accounts(self) -> bool:
         value = self.data.get("auto_remove_invalid_accounts", False)
         if isinstance(value, str):
@@ -430,6 +473,9 @@ class ConfigStore:
         data["image_ip_minute_limit"] = self.image_ip_minute_limit
         data["high_res_relay_fail_threshold"] = self.high_res_relay_fail_threshold
         data["high_res_relay_cooldown_seconds"] = self.high_res_relay_cooldown_seconds
+        data["image_route_1k"] = self.image_route_1k
+        data["image_route_2k"] = self.image_route_2k
+        data["image_route_4k"] = self.image_route_4k
         data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts
         data["auto_remove_rate_limited_accounts"] = self.auto_remove_rate_limited_accounts
         data["log_levels"] = self.log_levels
@@ -451,6 +497,9 @@ class ConfigStore:
             next_data["backup"] = _normalize_backup_settings(next_data.get("backup"))
         if "register_defaults" in next_data:
             next_data["register_defaults"] = _normalize_register_defaults(next_data.get("register_defaults"))
+        next_data["image_route_1k"] = _normalize_image_route(next_data.get("image_route_1k"), DEFAULT_IMAGE_ROUTES["1k"])
+        next_data["image_route_2k"] = _normalize_image_route(next_data.get("image_route_2k"), DEFAULT_IMAGE_ROUTES["2k"])
+        next_data["image_route_4k"] = _normalize_image_route(next_data.get("image_route_4k"), DEFAULT_IMAGE_ROUTES["4k"])
         next_data.pop("backup_state", None)
         self.data = next_data
         self._save()
