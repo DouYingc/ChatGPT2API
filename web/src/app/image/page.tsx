@@ -359,9 +359,11 @@ async function syncConversationImageTasks(items: ImageConversation[]) {
     };
   });
 
-  if (changed) {
-    await saveImageConversations(normalized);
+  if (!changed) {
+    return items;
   }
+
+  await saveImageConversations(normalized);
   return normalized;
 }
 
@@ -423,6 +425,7 @@ function ImagePageContent({ isAdmin, storageScope }: { isAdmin: boolean; storage
   const resultsViewportRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const taskSyncInFlightRef = useRef(false);
   // 滚动位置：每个会话独立记一份，刷新/切页都能落回上次位置
   const scrollPositionsRef = useRef<Record<string, number>>({});
   const restoredConversationIdRef = useRef<string | null>(null);
@@ -511,6 +514,10 @@ function ImagePageContent({ isAdmin, storageScope }: { isAdmin: boolean; storage
         const stats = getImageConversationStats(conversation);
         return sum + stats.queued + stats.running;
       }, 0),
+    [conversations],
+  );
+  const loadingTaskSignature = useMemo(
+    () => conversations.flatMap((conversation) => collectLoadingTaskIds(conversation)).sort().join("|"),
     [conversations],
   );
   const deleteConfirmTitle =
@@ -735,6 +742,62 @@ function ImagePageContent({ isAdmin, storageScope }: { isAdmin: boolean; storage
       window.removeEventListener("focus", handleFocus);
     };
   }, [isAdmin, loadQuota]);
+
+  const syncLoadingTasksIntoView = useCallback(async () => {
+    if (taskSyncInFlightRef.current) {
+      return;
+    }
+
+    const current = conversationsRef.current;
+    const hadLoadingTasks = current.some((conversation) => collectLoadingTaskIds(conversation).length > 0);
+    if (!hadLoadingTasks) {
+      return;
+    }
+
+    taskSyncInFlightRef.current = true;
+    try {
+      const nextConversations = await syncConversationImageTasks(current);
+      if (nextConversations === current) {
+        return;
+      }
+
+      conversationsRef.current = nextConversations;
+      setConversations(nextConversations);
+
+      const hasLoadingTasks = nextConversations.some(
+        (conversation) => collectLoadingTaskIds(conversation).length > 0,
+      );
+      if (!hasLoadingTasks) {
+        void loadQuota();
+      }
+    } finally {
+      taskSyncInFlightRef.current = false;
+    }
+  }, [loadQuota]);
+
+  useEffect(() => {
+    if (!loadingTaskSignature) {
+      return;
+    }
+
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled) {
+        return;
+      }
+      await syncLoadingTasksIntoView();
+    };
+
+    void tick();
+    const timer = window.setInterval(() => {
+      void tick();
+    }, 2500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [loadingTaskSignature, syncLoadingTasksIntoView]);
 
   // 滚动行为：
   // 1) 切换/打开会话首帧 → 同步落到上次记忆的 scrollTop（落不到就到底，无动画）
