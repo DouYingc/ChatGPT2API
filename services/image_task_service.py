@@ -13,6 +13,7 @@ from services.content_filter import request_text
 from services.image_owners_service import record_owner_for_result
 from services.image_prompts_service import record_prompt_for_result
 from services.log_service import LOG_TYPE_CALL, log_service
+from services.public_errors import public_error_message
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
 
 TASK_STATUS_QUEUED = "queued"
@@ -78,34 +79,11 @@ def _collect_image_urls(data: list[Any]) -> list[str]:
     return urls
 
 
-def _should_hide_user_error(message: str) -> bool:
-    normalized = message.lower()
-    return any(
-        marker in normalized
-        for marker in (
-            "高清中转接口调用失败",
-            "中转接口调用失败",
-            "duck:",
-            "und_err_socket",
-            "socketerror",
-            "remotedisconnected",
-            "connection closed",
-            "connection aborted",
-            "fetch failed",
-            "curl:",
-            "status_code=500",
-            "traceid:",
-        )
-    )
-
-
 def _public_error(task: dict[str, Any], *, sanitize_errors: bool) -> str:
     message = _clean(task.get("error"))
     if not sanitize_errors or not message:
         return message
-    if _should_hide_user_error(message):
-        return "接口繁忙，请稍后重试"
-    return message
+    return public_error_message(message)
 
 
 def _public_task(task: dict[str, Any], *, sanitize_errors: bool = False) -> dict[str, Any]:
@@ -386,6 +364,7 @@ class ImageTaskService:
                 request_preview=request_text(payload.get("prompt")),
                 size=_clean(payload.get("size")),
                 resolution=_clean(payload.get("resolution")),
+                quota_cost=_quota_cost(payload.get("quota_cost")),
                 urls=_collect_image_urls(data),
             )
         except Exception as exc:
@@ -408,6 +387,7 @@ class ImageTaskService:
                 request_preview=request_text(payload.get("prompt")),
                 size=_clean(payload.get("size")),
                 resolution=_clean(payload.get("resolution")),
+                quota_cost=_quota_cost(payload.get("quota_cost")),
                 status="failed",
                 error=error_message,
             )
@@ -423,6 +403,7 @@ class ImageTaskService:
         request_preview: str = "",
         size: str = "",
         resolution: str = "",
+        quota_cost: int = 1,
         status: str = "success",
         error: str = "",
         urls: list[str] | None = None,
@@ -446,6 +427,8 @@ class ImageTaskService:
             detail["size"] = size
         if resolution:
             detail["resolution"] = resolution
+        detail["quota_cost"] = _quota_cost(quota_cost)
+        detail["image_route"] = config.image_route_for_resolution(resolution or "1k")
         if error:
             detail["error"] = error
         if urls:

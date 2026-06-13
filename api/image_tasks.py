@@ -17,6 +17,7 @@ from services.config import config
 from services.content_filter import check_request
 from services.image_task_service import image_task_service
 from services.log_service import LoggedCall
+from services.public_errors import public_error_detail, should_sanitize_identity
 from services.rate_limit_service import RateLimitExceeded, rate_limit_service
 
 
@@ -41,6 +42,8 @@ async def filter_or_log(call: LoggedCall, text: str) -> None:
         await run_in_threadpool(check_request, text)
     except HTTPException as exc:
         call.log("调用失败", status="failed", error=str(exc.detail))
+        if should_sanitize_identity(call.identity):
+            raise HTTPException(status_code=exc.status_code, detail=public_error_detail(exc.detail)) from exc
         raise
 
 
@@ -55,6 +58,17 @@ def _enforce_image_ip_limit(identity: dict[str, object], request: Request) -> No
         )
     except RateLimitExceeded as exc:
         raise HTTPException(status_code=429, detail={"error": str(exc)}) from exc
+
+
+def _image_log_metadata(payload: dict[str, object], *, size: object = None, quota_cost: int = 1) -> dict[str, object]:
+    resolution = str(payload.get("resolution") or "1k").strip().lower() or "1k"
+    return {
+        "size": size,
+        "resolution": resolution,
+        "n": 1,
+        "quota_cost": max(1, int(quota_cost or 1)),
+        "image_route": config.image_route_for_resolution(resolution),
+    }
 
 
 def create_router() -> APIRouter:
@@ -93,7 +107,17 @@ def create_router() -> APIRouter:
         consume_user_quota(identity, quota_cost)
         # 后续任意 fail-fast 路径都要把预扣额度退掉，避免参数错误也白扣
         try:
-            await filter_or_log(LoggedCall(identity, "/api/image-tasks/generations", body.model, "文生图任务", request_text=body.prompt), body.prompt)
+            await filter_or_log(
+                LoggedCall(
+                    identity,
+                    "/api/image-tasks/generations",
+                    body.model,
+                    "文生图任务",
+                    request_text=body.prompt,
+                    metadata=_image_log_metadata(payload, size=body.size, quota_cost=quota_cost),
+                ),
+                body.prompt,
+            )
             return await run_in_threadpool(
                 image_task_service.submit_generation,
                 identity,
@@ -137,7 +161,17 @@ def create_router() -> APIRouter:
         quota_cost = image_quota_cost_for_payload(payload)
         consume_user_quota(identity, quota_cost)
         try:
-            await filter_or_log(LoggedCall(identity, "/api/image-tasks/edits", model, "图生图任务", request_text=prompt), prompt)
+            await filter_or_log(
+                LoggedCall(
+                    identity,
+                    "/api/image-tasks/edits",
+                    model,
+                    "图生图任务",
+                    request_text=prompt,
+                    metadata=_image_log_metadata(payload, size=size, quota_cost=quota_cost),
+                ),
+                prompt,
+            )
             uploads = [*(image or []), *(image_list or [])]
             if not uploads:
                 raise HTTPException(status_code=400, detail={"error": "image file is required"})

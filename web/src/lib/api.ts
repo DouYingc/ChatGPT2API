@@ -1,5 +1,6 @@
 import { httpRequest, request } from "@/lib/request";
 import webConfig from "@/constants/common-env";
+import { publicErrorMessage } from "@/lib/public-error";
 import { getStoredAuthKey } from "@/store/auth";
 
 export type AccountType = string;
@@ -26,6 +27,8 @@ export type Account = {
   }>;
   default_model_slug?: string | null;
   restore_at?: string | null;
+  rate_limited_at?: string | null;
+  rate_limit_reset_at?: string | null;
   success: number;
   fail: number;
   last_used_at?: string | null;
@@ -391,6 +394,38 @@ export type QuotaLedgerEntry = {
   meta?: Record<string, unknown>;
 };
 
+export type AdminOverview = {
+  date: string;
+  image: {
+    total: number;
+    success: number;
+    failed: number;
+    success_rate: number;
+    avg_duration_ms: number;
+  };
+  users: {
+    total: number;
+    new: number;
+  };
+  quota: {
+    redeemed: number;
+    consumed: number;
+    refunded: number;
+  };
+  recent_failures: Array<{
+    id?: string;
+    time?: string;
+    summary?: string;
+    key_name?: string;
+    status?: string;
+    duration_ms?: number;
+    resolution?: string;
+    image_route?: string;
+    quota_cost?: number;
+    error?: string;
+  }>;
+};
+
 export type HighResRelayTestResult = {
   ok: boolean;
   status: number;
@@ -753,6 +788,10 @@ export async function fetchSystemLogs(filters: { type?: string; start_date?: str
   if (filters.start_date) params.set("start_date", filters.start_date);
   if (filters.end_date) params.set("end_date", filters.end_date);
   return httpRequest<{ items: SystemLog[] }>(`/api/logs${params.toString() ? `?${params.toString()}` : ""}`);
+}
+
+export async function fetchAdminOverview() {
+  return httpRequest<AdminOverview>("/api/admin/overview");
 }
 
 export async function deleteSystemLogs(ids: string[]) {
@@ -1362,15 +1401,20 @@ export async function* streamChat(
 ): AsyncGenerator<ChatStreamEvent, void, void> {
   const authKey = await getStoredAuthKey();
   const baseUrl = webConfig.apiUrl.replace(/\/$/, "");
-  const response = await fetch(`${baseUrl}/api/chat/stream`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(authKey ? { Authorization: `Bearer ${authKey}` } : {}),
-    },
-    body: JSON.stringify(body),
-    signal: abortSignal,
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/api/chat/stream`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(authKey ? { Authorization: `Bearer ${authKey}` } : {}),
+      },
+      body: JSON.stringify(body),
+      signal: abortSignal,
+    });
+  } catch (error) {
+    throw new Error(publicErrorMessage(error));
+  }
   if (!response.ok || !response.body) {
     let message = `请求失败 (${response.status})`;
     try {
@@ -1381,7 +1425,7 @@ export async function* streamChat(
     } catch {
       // 非 JSON 错误体走默认 message
     }
-    throw new Error(message);
+    throw new Error(publicErrorMessage(message));
   }
   const reader = response.body.getReader();
   const decoder = new TextDecoder("utf-8");

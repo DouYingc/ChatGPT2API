@@ -1,5 +1,5 @@
 "use client";
-import { ArrowUp, Check, ChevronDown, CornerDownRight, ImagePlus, Infinity as InfinityIcon, X } from "lucide-react";
+import { ArrowUp, Check, ChevronDown, CornerDownRight, ExternalLink, ImagePlus, Infinity as InfinityIcon, Ticket, X } from "lucide-react";
 import {
   useEffect,
   useLayoutEffect,
@@ -12,6 +12,7 @@ import {
 } from "react";
 
 import { ImageLightbox } from "@/components/image-lightbox";
+import { QuotaRedeemPopover } from "@/components/quota-popover";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
@@ -51,6 +52,9 @@ type ImageComposerProps = {
   canUseHighResolution: boolean;
   availableQuota: string;
   activeTaskCount: number;
+  showQuotaActions?: boolean;
+  onOpenQuotaShop?: () => void;
+  onQuotaRedeemed?: () => void | Promise<void>;
   referenceImages: Array<{ name: string; dataUrl: string }>;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   fileInputRef: RefObject<HTMLInputElement | null>;
@@ -74,6 +78,9 @@ export function ImageComposer({
   canUseHighResolution,
   availableQuota,
   activeTaskCount,
+  showQuotaActions = false,
+  onOpenQuotaShop,
+  onQuotaRedeemed,
   referenceImages,
   textareaRef,
   fileInputRef,
@@ -399,6 +406,26 @@ export function ImageComposer({
                       <span className="font-data tabular-nums text-stone-900">{availableQuota}</span>
                     )}
                   </span>
+                  {showQuotaActions ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={onOpenQuotaShop}
+                        className="inline-flex h-9 shrink-0 cursor-pointer items-center gap-1.5 rounded-full bg-stone-900 px-3 text-[12px] font-medium text-white transition hover:bg-stone-800 sm:h-10 sm:px-4 sm:text-[13px]"
+                      >
+                        <ExternalLink className="size-3.5 sm:size-4" />
+                        <span>购买额度</span>
+                      </button>
+                      <QuotaRedeemPopover
+                        triggerLabel="兑换码"
+                        triggerTitle="兑换额度"
+                        triggerIcon={<Ticket className="size-3.5 shrink-0 sm:size-4" />}
+                        triggerClassName="h-9 shrink-0 rounded-full border-0 bg-stone-100 px-3 text-[12px] font-medium text-stone-700 shadow-none hover:bg-stone-200 sm:h-10 sm:px-4 sm:text-[13px]"
+                        align="center"
+                        onRedeemed={() => onQuotaRedeemed?.()}
+                      />
+                    </>
+                  ) : null}
                   <div className="relative shrink-0">
                     <button
                       ref={countMenuBtnRef}

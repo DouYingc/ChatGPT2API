@@ -66,17 +66,7 @@ def is_token_invalid_error(message: str) -> bool:
 
 
 def is_rate_limit_error(exc: Exception | str) -> bool:
-    status_code = getattr(exc, "status_code", None)
-    if status_code == 429:
-        return True
-    text = str(exc or "").lower()
-    return (
-        "status=429" in text
-        or "http 429" in text
-        or "too many requests" in text
-        or "rate_limit_exceeded" in text
-        or "usage_limit_reached" in text
-    )
+    return account_service._is_rate_limit_error(exc)
 
 
 def mark_image_failure(access_token: str, exc: Exception | None = None) -> None:
@@ -94,6 +84,8 @@ def mark_image_failure(access_token: str, exc: Exception | None = None) -> None:
 def image_stream_error_message(message: str) -> str:
     text = str(message or "")
     lower = text.lower()
+    if account_service._is_free_plan_image_limit_text(lower):
+        return "当前账号生图额度已用完，请稍后重试或切换账号。"
     if "curl: (35)" in lower or "tls connect error" in lower or "openssl_internal" in lower:
         return "upstream image connection failed, please retry later"
     return text or "image generation failed"
@@ -1160,6 +1152,18 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                 break
             except ImageGenerationError as exc:
                 mark_image_failure(token, exc)
+                if is_rate_limit_error(exc):
+                    last_error = str(exc)
+                    logger.warning({
+                        "event": "image_account_rate_limited",
+                        "model": request.model,
+                        "requested_resolution": request.resolution or "",
+                        "requested_size": request.size or "",
+                        "token": anonymize_token(token),
+                        "error": last_error,
+                    })
+                    if not emitted_for_token:
+                        continue
                 raise
             except Exception as exc:
                 last_error = str(exc)

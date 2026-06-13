@@ -31,6 +31,7 @@ from services.config import config
 from services.image_owners_service import record_owner_for_result
 from services.image_prompts_service import record_prompt_for_result
 from services.log_service import LOG_TYPE_CALL, log_service
+from services.public_errors import public_error_message, should_sanitize_identity
 from services.rate_limit_service import RateLimitExceeded, rate_limit_service
 from services.protocol.conversation import (
     ConversationRequest,
@@ -202,6 +203,12 @@ def _log_chat_call(
     log_service.add(LOG_TYPE_CALL, summary, detail)
 
 
+def _public_stream_error(identity: dict[str, Any], message: object) -> str:
+    if should_sanitize_identity(identity):
+        return public_error_message(message)
+    return str(message or "请求失败，请稍后重试")
+
+
 def _last_user_text(messages: list[dict[str, Any]]) -> str:
     for message in reversed(messages or []):
         if not isinstance(message, dict):
@@ -363,7 +370,7 @@ def _stream_image(body: ChatStreamRequest, identity: dict[str, Any], policy_payl
                 status="failed",
                 error=message,
             )
-            yield _sse({"type": "error", "message": message})
+            yield _sse({"type": "error", "message": _public_stream_error(identity, message)})
             return
         if result_data:
             record_owner_for_result(identity, result_data)
@@ -392,7 +399,7 @@ def _stream_image(body: ChatStreamRequest, identity: dict[str, Any], policy_payl
             status="failed",
             error=str(exc),
         )
-        yield _sse({"type": "error", "message": str(exc)})
+        yield _sse({"type": "error", "message": _public_stream_error(identity, exc)})
 
 
 def _resolve_preferred_token(user_id: str, upstream_cid: str) -> str:
@@ -469,7 +476,7 @@ def _stream(body: ChatStreamRequest, identity: dict[str, Any]) -> Iterator[str]:
             status="failed",
             error=str(exc),
         )
-        yield _sse({"type": "error", "message": str(exc)})
+        yield _sse({"type": "error", "message": _public_stream_error(identity, exc)})
     finally:
         if delivered_any and not failed:
             _log_chat_call(

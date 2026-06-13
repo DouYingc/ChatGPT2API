@@ -15,6 +15,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from services.config import DATA_DIR
+from services.public_errors import public_error_detail, public_error_message, should_sanitize_identity
 from utils.helper import anthropic_sse_stream, sse_json_stream
 
 LOG_TYPE_CALL = "call"
@@ -137,14 +138,15 @@ def _request_excerpt(text: object, limit: int = 1000) -> str:
     return normalized[: limit - 1].rstrip() + "…"
 
 
-def _image_error_response(exc: Exception) -> JSONResponse:
+def _image_error_response(exc: Exception, identity: dict[str, object] | None = None) -> JSONResponse:
     message = str(exc)
+    public_message = public_error_message(message) if should_sanitize_identity(identity) else message
     if "no available image quota" in message.lower():
         return JSONResponse(
             status_code=429,
             content={
                 "error": {
-                    "message": "no available image quota",
+                    "message": public_message,
                     "type": "insufficient_quota",
                     "param": None,
                     "code": "insufficient_quota",
@@ -152,12 +154,18 @@ def _image_error_response(exc: Exception) -> JSONResponse:
             },
         )
     if hasattr(exc, "to_openai_error") and hasattr(exc, "status_code"):
-        return JSONResponse(status_code=int(exc.status_code), content=exc.to_openai_error())
+        content = exc.to_openai_error()
+        if should_sanitize_identity(identity):
+            try:
+                content["error"]["message"] = public_message
+            except Exception:
+                content = {"error": {"message": public_message, "type": "server_error", "param": None, "code": "upstream_error"}}
+        return JSONResponse(status_code=int(exc.status_code), content=content)
     return JSONResponse(
         status_code=502,
         content={
             "error": {
-                "message": message,
+                "message": public_message,
                 "type": "server_error",
                 "param": None,
                 "code": "upstream_error",
@@ -192,6 +200,7 @@ class LoggedCall:
     on_failure: "Callable[[int], None] | None" = None
     # 失败时退多少。一般 = 入口扣费金额。
     failure_refund_amount: int = 1
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def _refund(self) -> None:
         cb = self.on_failure
@@ -211,14 +220,17 @@ class LoggedCall:
         except ImageGenerationError as exc:
             self.log("调用失败", status="failed", error=str(exc))
             self._refund()
-            return _image_error_response(exc)
+            return _image_error_response(exc, self.identity)
         except HTTPException as exc:
             self.log("调用失败", status="failed", error=str(exc.detail))
+            if should_sanitize_identity(self.identity):
+                raise HTTPException(status_code=exc.status_code, detail=public_error_detail(exc.detail)) from exc
             raise
         except Exception as exc:
             self.log("调用失败", status="failed", error=str(exc))
             self._refund()
-            raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
+            message = public_error_message(exc) if should_sanitize_identity(self.identity) else str(exc)
+            raise HTTPException(status_code=502, detail={"error": message}) from exc
 
         if isinstance(result, dict):
             self.log("调用完成", result)
@@ -230,14 +242,17 @@ class LoggedCall:
         except ImageGenerationError as exc:
             self.log("调用失败", status="failed", error=str(exc))
             self._refund()
-            return _image_error_response(exc)
+            return _image_error_response(exc, self.identity)
         except HTTPException as exc:
             self.log("调用失败", status="failed", error=str(exc.detail))
+            if should_sanitize_identity(self.identity):
+                raise HTTPException(status_code=exc.status_code, detail=public_error_detail(exc.detail)) from exc
             raise
         except Exception as exc:
             self.log("调用失败", status="failed", error=str(exc))
             self._refund()
-            raise HTTPException(status_code=502, detail={"error": str(exc)}) from exc
+            message = public_error_message(exc) if should_sanitize_identity(self.identity) else str(exc)
+            raise HTTPException(status_code=502, detail={"error": message}) from exc
         if not has_first:
             self.log("流式调用结束")
             return StreamingResponse(sender(()), media_type="text/event-stream")
@@ -301,6 +316,10 @@ class LoggedCall:
             "duration_ms": int((time.time() - self.started) * 1000),
             "status": status,
         }
+        for key, value in (self.metadata or {}).items():
+            if value is None or value == "":
+                continue
+            detail[str(key)] = value
         request_excerpt = _request_excerpt(self.request_text)
         if request_excerpt:
             detail["request_text"] = request_excerpt

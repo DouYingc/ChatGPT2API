@@ -10,6 +10,7 @@ import { clearStoredAuthSession, type StoredAuthSession } from "@/store/auth";
 import { QuotaPopover } from "@/components/quota-popover";
 
 const adminNavItems = [
+  { href: "/dashboard", label: "概览" },
   { href: "/chat", label: "对话" },
   { href: "/image", label: "画图" },
   { href: "/gallery", label: "画廊" },

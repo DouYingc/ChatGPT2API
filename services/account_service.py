@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
+import re
 from threading import Condition, Lock
 from typing import Any
 from datetime import datetime, timedelta, timezone
@@ -68,7 +69,19 @@ class AccountService:
         return bool(reset_at and datetime.now(timezone.utc) < reset_at)
 
     @staticmethod
-    def _is_rate_limit_error(exc: Exception | str) -> bool:
+    def _is_free_plan_image_limit_text(text: object) -> bool:
+        lower = str(text or "").lower()
+        return (
+            "free plan limit" in lower
+            and (
+                "image generation" in lower
+                or "image generations" in lower
+                or "images" in lower
+            )
+        )
+
+    @classmethod
+    def _is_rate_limit_error(cls, exc: Exception | str) -> bool:
         if getattr(exc, "status_code", None) == 429:
             return True
         text = str(exc or "").lower()
@@ -78,6 +91,8 @@ class AccountService:
             or "too many requests" in text
             or "rate_limit_exceeded" in text
             or "usage_limit_reached" in text
+            or cls._is_free_plan_image_limit_text(text)
+            or ("limit resets" in text and "image" in text)
         )
 
     @classmethod
@@ -765,12 +780,47 @@ class AccountService:
         return None
 
     @classmethod
+    def _search_text(cls, value: object) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, (dict, list)):
+            try:
+                return json.dumps(value, ensure_ascii=False)
+            except Exception:
+                return str(value)
+        return str(value)
+
+    @classmethod
+    def _parse_text_rate_limit_reset(cls, value: object, now: datetime) -> datetime | None:
+        text = cls._search_text(value).strip()
+        if not text:
+            return None
+
+        total_seconds = 0.0
+        patterns = (
+            (r"(\d+(?:\.\d+)?)\s*(?:days?|d\b|天)", 24 * 60 * 60),
+            (r"(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h\b|小时|小時)", 60 * 60),
+            (r"(\d+(?:\.\d+)?)\s*(?:minutes?|mins?|m\b|分钟|分鐘)", 60),
+            (r"(\d+(?:\.\d+)?)\s*(?:seconds?|secs?|s\b|秒)", 1),
+        )
+        for pattern, multiplier in patterns:
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                try:
+                    total_seconds += float(match.group(1)) * multiplier
+                except (TypeError, ValueError):
+                    continue
+        if total_seconds <= 0:
+            return None
+        return now + timedelta(seconds=min(total_seconds, 30 * 24 * 60 * 60))
+
+    @classmethod
     def _rate_limit_reset_from_error(
             cls,
             headers: object = None,
             body: object = None,
             reset_at: object = None,
             cooldown_seconds: int | None = None,
+            error: object = None,
     ) -> datetime:
         now = datetime.now(timezone.utc)
         parsed_reset = cls._parse_datetime(reset_at)
@@ -783,7 +833,16 @@ class AccountService:
         ):
             if candidate is not None:
                 return candidate.astimezone(timezone.utc)
-        seconds = max(1, min(7200, int(cooldown_seconds or 5)))
+        for text_value in (error, body):
+            candidate = cls._parse_text_rate_limit_reset(text_value, now)
+            if candidate is not None:
+                return candidate.astimezone(timezone.utc)
+
+        text = f"{cls._search_text(error)} {cls._search_text(body)}"
+        fallback_seconds = cooldown_seconds
+        if fallback_seconds is None:
+            fallback_seconds = 7200 if cls._is_free_plan_image_limit_text(text) else 5
+        seconds = max(1, min(24 * 60 * 60, int(fallback_seconds)))
         return now + timedelta(seconds=seconds)
 
     def mark_image_rate_limited(
@@ -799,7 +858,7 @@ class AccountService:
             return None
         self.release_image_slot(access_token)
         rate_limited_at = datetime.now(timezone.utc)
-        rate_limit_reset_at = self._rate_limit_reset_from_error(headers, body, reset_at, cooldown_seconds)
+        rate_limit_reset_at = self._rate_limit_reset_from_error(headers, body, reset_at, cooldown_seconds, error)
         with self._lock:
             current = self._accounts.get(access_token)
             if current is None:
@@ -808,7 +867,7 @@ class AccountService:
             next_item["status"] = "限流"
             next_item["rate_limited_at"] = self._format_datetime(rate_limited_at)
             next_item["rate_limit_reset_at"] = self._format_datetime(rate_limit_reset_at)
-            next_item["restore_at"] = next_item.get("restore_at") or next_item["rate_limit_reset_at"]
+            next_item["restore_at"] = next_item["rate_limit_reset_at"]
             next_item["fail"] = int(next_item.get("fail") or 0) + 1
             next_item["last_used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             account = self._normalize_account(next_item)

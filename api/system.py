@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+from typing import Any
 from urllib.parse import quote
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -65,6 +67,61 @@ class BackupDeleteRequest(BaseModel):
 class PasswordAuthRequest(BaseModel):
     username: str = ""
     password: str = ""
+
+
+def _local_day_key(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone()
+        return parsed.strftime("%Y-%m-%d")
+    except Exception:
+        return text[:10]
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _log_detail(item: dict[str, Any]) -> dict[str, Any]:
+    detail = item.get("detail")
+    return detail if isinstance(detail, dict) else {}
+
+
+def _is_image_call_log(item: dict[str, Any]) -> bool:
+    detail = _log_detail(item)
+    endpoint = str(detail.get("endpoint") or "").lower()
+    summary = str(item.get("summary") or "")
+    return "/images/" in endpoint or "/image-tasks/" in endpoint or "生图" in summary
+
+
+def _overview_log_item(item: dict[str, Any]) -> dict[str, object]:
+    detail = _log_detail(item)
+    return {
+        "id": item.get("id"),
+        "time": item.get("time"),
+        "summary": item.get("summary") or "",
+        "key_name": detail.get("key_name") or "",
+        "status": detail.get("status") or "",
+        "duration_ms": _safe_int(detail.get("duration_ms")),
+        "resolution": detail.get("resolution") or "",
+        "image_route": detail.get("image_route") or detail.get("route") or "",
+        "quota_cost": _safe_int(detail.get("quota_cost")),
+        "error": detail.get("error") or "",
+    }
 
 
 def _login_payload(identity: dict[str, object], app_version: str, *, key: str | None = None) -> dict[str, object]:
@@ -141,6 +198,64 @@ def create_router(app_version: str) -> APIRouter:
     async def get_settings(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"config": config.get()}
+
+    @router.get("/api/admin/overview")
+    async def get_admin_overview(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        today = datetime.now().strftime("%Y-%m-%d")
+        call_logs = log_service.list(type="call", start_date=today, end_date=today, limit=1000)
+        image_logs = [item for item in call_logs if _is_image_call_log(item)]
+        success_logs = [item for item in image_logs if _log_detail(item).get("status") == "success"]
+        failed_logs = [item for item in image_logs if _log_detail(item).get("status") == "failed"]
+        finished_logs = [item for item in image_logs if _safe_int(_log_detail(item).get("duration_ms")) > 0]
+        avg_duration_ms = (
+            round(sum(_safe_float(_log_detail(item).get("duration_ms")) for item in finished_logs) / len(finished_logs))
+            if finished_logs else 0
+        )
+        success_rate = round((len(success_logs) / len(image_logs)) * 100, 1) if image_logs else 100.0
+
+        users = auth_service.list_keys(role="user")
+        new_users = [item for item in users if _local_day_key(item.get("created_at")) == today]
+        ledger_items = [
+            item for item in quota_ledger_service.list_entries(limit=1000)
+            if _local_day_key(item.get("created_at")) == today
+        ]
+        redeemed_quota = sum(
+            max(0, _safe_int(item.get("amount")))
+            for item in ledger_items
+            if str(item.get("action") or "") == "redeem"
+        )
+        consumed_quota = sum(
+            abs(_safe_int(item.get("amount")))
+            for item in ledger_items
+            if str(item.get("action") or "").endswith("_consume") and _safe_int(item.get("amount")) < 0
+        )
+        refunded_quota = sum(
+            max(0, _safe_int(item.get("amount")))
+            for item in ledger_items
+            if str(item.get("action") or "").endswith("_refund")
+        )
+
+        return {
+            "date": today,
+            "image": {
+                "total": len(image_logs),
+                "success": len(success_logs),
+                "failed": len(failed_logs),
+                "success_rate": success_rate,
+                "avg_duration_ms": avg_duration_ms,
+            },
+            "users": {
+                "total": len(users),
+                "new": len(new_users),
+            },
+            "quota": {
+                "redeemed": redeemed_quota,
+                "consumed": consumed_quota,
+                "refunded": refunded_quota,
+            },
+            "recent_failures": [_overview_log_item(item) for item in failed_logs[:8]],
+        }
 
     @router.post("/api/settings")
     async def save_settings(body: SettingsUpdateRequest, authorization: str | None = Header(default=None)):

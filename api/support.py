@@ -9,6 +9,7 @@ from services.account_service import account_service
 from services.auth_service import auth_service
 from services.config import config
 from services.protocol.conversation import normalize_image_resolution
+from services.public_errors import public_error_message
 from utils.helper import split_image_model
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -82,8 +83,8 @@ def client_ip_from_request(request: Request) -> str:
 def raise_image_quota_error(exc: Exception) -> None:
     message = str(exc)
     if "no available image quota" in message.lower():
-        raise HTTPException(status_code=429, detail={"error": "no available image quota"}) from exc
-    raise HTTPException(status_code=502, detail={"error": message}) from exc
+        raise HTTPException(status_code=429, detail={"error": public_error_message(message)}) from exc
+    raise HTTPException(status_code=502, detail={"error": public_error_message(message)}) from exc
 
 
 def can_use_paid_image_accounts(identity: dict[str, object]) -> bool:

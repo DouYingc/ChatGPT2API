@@ -39,10 +39,10 @@ function normalizeSession(value: unknown, fallbackKey = ""): StoredAuthSession |
   };
 }
 
-export function getDefaultRouteForRole(_role: AuthRole) {
-  // admin / user 登录后默认都进对话；这里是单一真相源，
+export function getDefaultRouteForRole(role: AuthRole) {
+  // admin 登录后先进概览，user 仍进对话；这里是单一真相源，
   // 首页 redirect、登录成功跳转、auth-guard 兜底都会读这个。
-  return "/chat";
+  return role === "admin" ? "/dashboard" : "/chat";
 }
 
 export async function getStoredAuthKey() {

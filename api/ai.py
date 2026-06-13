@@ -18,6 +18,7 @@ from services.content_filter import check_request, request_text
 from services.image_owners_service import record_owner_for_result
 from services.image_prompts_service import record_prompt_for_result
 from services.log_service import LoggedCall
+from services.public_errors import public_error_detail, should_sanitize_identity
 from services.rate_limit_service import RateLimitExceeded, rate_limit_service
 from services.protocol import (
     anthropic_v1_messages,
@@ -72,6 +73,8 @@ async def filter_or_log(call: LoggedCall, text: str) -> None:
         await run_in_threadpool(check_request, text)
     except HTTPException as exc:
         call.log("调用失败", status="failed", error=str(exc.detail))
+        if should_sanitize_identity(call.identity):
+            raise HTTPException(status_code=exc.status_code, detail=public_error_detail(exc.detail)) from exc
         raise
 
 
@@ -86,6 +89,17 @@ def _enforce_image_ip_limit(identity: dict[str, object], request: Request) -> No
         )
     except RateLimitExceeded as exc:
         raise HTTPException(status_code=429, detail={"error": str(exc)}) from exc
+
+
+def _image_log_metadata(payload: dict[str, object], *, count: int = 1, quota_cost: int = 1) -> dict[str, object]:
+    resolution = str(payload.get("resolution") or "1k").strip().lower() or "1k"
+    return {
+        "size": payload.get("size"),
+        "resolution": resolution,
+        "n": max(1, int(count or 1)),
+        "quota_cost": max(1, int(quota_cost or 1)),
+        "image_route": config.image_route_for_resolution(resolution),
+    }
 
 
 def create_router() -> APIRouter:
@@ -120,6 +134,7 @@ def create_router() -> APIRouter:
             request_text=body.prompt,
             on_failure=lambda amount: refund_user_quota(identity, amount),
             failure_refund_amount=quota_cost,
+            metadata=_image_log_metadata(payload, count=n, quota_cost=quota_cost),
         )
         await filter_or_log(call, body.prompt)
         consume_user_quota(identity, quota_cost)
@@ -166,6 +181,7 @@ def create_router() -> APIRouter:
             request_text=prompt,
             on_failure=lambda amount: refund_user_quota(identity, amount),
             failure_refund_amount=quota_cost,
+            metadata=_image_log_metadata(payload, count=effective_n, quota_cost=quota_cost),
         )
         await filter_or_log(call, prompt)
         consume_user_quota(identity, quota_cost)

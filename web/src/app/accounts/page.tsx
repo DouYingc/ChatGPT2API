@@ -64,6 +64,17 @@ const accountStatusOptions: { label: string; value: AccountStatus | "all" }[] = 
   { label: "禁用", value: "禁用" },
 ];
 
+type AccountSortMode = "default" | "quota-asc" | "quota-desc" | "fail-desc" | "restore-asc" | "created-desc";
+
+const accountSortOptions: { label: string; value: AccountSortMode }[] = [
+  { label: "默认排序", value: "default" },
+  { label: "额度低到高", value: "quota-asc" },
+  { label: "额度高到低", value: "quota-desc" },
+  { label: "失败多到少", value: "fail-desc" },
+  { label: "恢复时间近", value: "restore-asc" },
+  { label: "注册时间新", value: "created-desc" },
+];
+
 const statusMeta: Record<
   AccountStatus,
   {
@@ -133,6 +144,35 @@ function formatRestoreAt(value?: string | null) {
   )}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 
   return { absolute, relative };
+}
+
+function accountRestoreAt(account: Account) {
+  return account.rate_limit_reset_at || account.restore_at;
+}
+
+function timestampValue(value?: string | null) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.getTime();
+}
+
+function compareMaybeNumber(
+  a: number | null,
+  b: number | null,
+  direction: "asc" | "desc" = "asc",
+) {
+  const aMissing = a === null || Number.isNaN(a);
+  const bMissing = b === null || Number.isNaN(b);
+  if (aMissing && bMissing) return 0;
+  if (aMissing) return 1;
+  if (bMissing) return -1;
+  return direction === "asc" ? a - b : b - a;
+}
+
+function quotaSortValue(account: Account) {
+  if (isUnlimitedImageQuotaAccount(account)) return Number.POSITIVE_INFINITY;
+  if (imageQuotaUnknown(account)) return null;
+  return Math.max(0, account.quota);
 }
 
 function formatDateTime(value?: string | null) {
@@ -292,7 +332,7 @@ function AccountCard({
     : isUnknown
       ? 0
       : Math.max(0, Math.min(100, Math.round((account.quota / maxQuota) * 100)));
-  const restore = formatRestoreAt(account.restore_at);
+  const restore = formatRestoreAt(accountRestoreAt(account));
 
   return (
     <div
@@ -436,8 +476,18 @@ function AccountCard({
 // 会出现塌缩→撑回的视觉跳动；命中缓存时直接给出已有数据并后台静默刷新。
 let cachedAccounts: Account[] | null = null;
 
+type AccountRefreshProgress = {
+  total: number;
+  done: number;
+  current: number;
+  currentLabel: string;
+  success: number;
+  fail: number;
+};
+
 function AccountsPageContent() {
   const didLoadRef = useRef(false);
+  const refreshProgressClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 命中模块级缓存时直接拿来当初始 state，避免再次切到号池页时
   // accounts 从 [] 起跳、isLoading=true 让大表格塌缩成 spinner 再撑回。
   const [accounts, setAccountsState] = useState<Account[]>(() => cachedAccounts ?? []);
@@ -445,6 +495,7 @@ function AccountsPageContent() {
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<AccountStatus | "all">("all");
+  const [sortMode, setSortMode] = useState<AccountSortMode>("default");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState("10");
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
@@ -457,6 +508,7 @@ function AccountsPageContent() {
   // 进度条最小显示时长：即便接口几十 ms 就返回，进度条也至少撑过一次完整滑动，
   // 避免出现"按钮 disabled 闪一下、进度条一闪而过"的视觉抖动。
   const [showProgress, setShowProgress] = useState(false);
+  const [refreshProgress, setRefreshProgress] = useState<AccountRefreshProgress | null>(null);
 
   // 写 accounts 同步刷新缓存。
   const setAccounts = (next: Account[]) => {
@@ -514,16 +566,52 @@ function AccountsPageContent() {
     void loadAccounts(cachedAccounts !== null);
   }, []);
 
+  useEffect(() => {
+    return () => {
+      if (refreshProgressClearTimerRef.current) {
+        clearTimeout(refreshProgressClearTimerRef.current);
+      }
+    };
+  }, []);
+
   const filteredAccounts = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
-    return accounts.filter((account) => {
+    const filtered = accounts.filter((account) => {
       const searchMatched =
         normalizedQuery.length === 0 || (account.email ?? "").toLowerCase().includes(normalizedQuery);
       const typeMatched = typeFilter === "all" || displayAccountType(account) === typeFilter;
       const statusMatched = statusFilter === "all" || account.status === statusFilter;
       return searchMatched && typeMatched && statusMatched;
     });
-  }, [accounts, query, statusFilter, typeFilter]);
+
+    return filtered
+      .map((account, index) => ({ account, index }))
+      .sort((left, right) => {
+        let result = 0;
+        switch (sortMode) {
+          case "quota-asc":
+            result = compareMaybeNumber(quotaSortValue(left.account), quotaSortValue(right.account), "asc");
+            break;
+          case "quota-desc":
+            result = compareMaybeNumber(quotaSortValue(left.account), quotaSortValue(right.account), "desc");
+            break;
+          case "fail-desc":
+            result = compareMaybeNumber(right.account.fail, left.account.fail, "asc");
+            break;
+          case "restore-asc":
+            result = compareMaybeNumber(timestampValue(accountRestoreAt(left.account)), timestampValue(accountRestoreAt(right.account)), "asc");
+            break;
+          case "created-desc":
+            result = compareMaybeNumber(timestampValue(left.account.created_at), timestampValue(right.account.created_at), "desc");
+            break;
+          case "default":
+          default:
+            result = 0;
+        }
+        return result || left.index - right.index;
+      })
+      .map((item) => item.account);
+  }, [accounts, query, sortMode, statusFilter, typeFilter]);
 
   const pageCount = Math.max(1, Math.ceil(filteredAccounts.length / Number(pageSize)));
   const safePage = Math.min(page, pageCount);
@@ -555,6 +643,19 @@ function AccountsPageContent() {
     const selectedSet = new Set(selectedIds);
     return accounts.filter((item) => selectedSet.has(item.access_token)).map((item) => item.access_token);
   }, [accounts, selectedIds]);
+
+  const refreshProgressPercent = refreshProgress
+    ? Math.round((Math.max(0, refreshProgress.done) / Math.max(1, refreshProgress.total)) * 100)
+    : 0;
+
+  const refreshProgressText = refreshProgress
+    ? `${Math.min(refreshProgress.done >= refreshProgress.total ? refreshProgress.total : refreshProgress.current, refreshProgress.total)}/${refreshProgress.total}`
+    : "";
+
+  const accountLabelByToken = (token: string) => {
+    const account = accounts.find((item) => item.access_token === token);
+    return account?.email || maskToken(token);
+  };
 
   const abnormalTokens = useMemo(() => {
     return accounts.filter((item) => item.status === "异常").map((item) => item.access_token);
@@ -595,29 +696,82 @@ function AccountsPageContent() {
   };
 
   const handleRefreshAccounts = async (accessTokens: string[]) => {
-    if (accessTokens.length === 0) {
+    const tokens = Array.from(new Set(accessTokens.map((token) => token.trim()).filter(Boolean)));
+    if (tokens.length === 0) {
       toast.error("没有需要刷新的账户");
       return;
     }
 
+    if (refreshProgressClearTimerRef.current) {
+      clearTimeout(refreshProgressClearTimerRef.current);
+      refreshProgressClearTimerRef.current = null;
+    }
+
     setIsRefreshing(true);
+    setRefreshProgress({
+      total: tokens.length,
+      done: 0,
+      current: 1,
+      currentLabel: accountLabelByToken(tokens[0]),
+      success: 0,
+      fail: 0,
+    });
+
+    let refreshed = 0;
+    const errors: Array<{ access_token: string; error: string }> = [];
+
     try {
-      const data = await refreshAccounts(accessTokens);
-      setAccounts(data.items);
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
-      if (data.errors.length > 0) {
-        const firstError = data.errors[0]?.error;
+      for (let index = 0; index < tokens.length; index += 1) {
+        const token = tokens[index];
+        setRefreshProgress({
+          total: tokens.length,
+          done: index,
+          current: index + 1,
+          currentLabel: accountLabelByToken(token),
+          success: refreshed,
+          fail: errors.length,
+        });
+
+        try {
+          const data = await refreshAccounts([token]);
+          refreshed += data.refreshed;
+          errors.push(
+            ...data.errors.map((item) => ({
+              access_token: item.access_token,
+              error: item.error,
+            })),
+          );
+          setAccounts(data.items);
+          setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "刷新账户失败";
+          errors.push({ access_token: token, error: message });
+        }
+
+        setRefreshProgress({
+          total: tokens.length,
+          done: index + 1,
+          current: Math.min(index + 2, tokens.length),
+          currentLabel: tokens[index + 1] ? accountLabelByToken(tokens[index + 1]) : "",
+          success: refreshed,
+          fail: errors.length,
+        });
+      }
+
+      if (errors.length > 0) {
+        const firstError = errors[0]?.error;
         toast.error(
-          `刷新成功 ${data.refreshed} 个，失败 ${data.errors.length} 个${firstError ? `，首个错误：${firstError}` : ""}`,
+          `刷新成功 ${refreshed} 个，失败 ${errors.length} 个${firstError ? `，首个错误：${firstError}` : ""}`,
         );
       } else {
-        toast.success(`刷新成功 ${data.refreshed} 个账户`);
+        toast.success(`刷新成功 ${refreshed} 个账户`);
       }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "刷新账户失败";
-      toast.error(message);
     } finally {
       setIsRefreshing(false);
+      refreshProgressClearTimerRef.current = setTimeout(() => {
+        setRefreshProgress(null);
+        refreshProgressClearTimerRef.current = null;
+      }, 1200);
     }
   };
 
@@ -771,6 +925,35 @@ function AccountsPageContent() {
       </Dialog>
 
       <section className="mt-3 space-y-3 lg:mt-2">
+        {refreshProgress ? (
+          <Card className="rounded-xl border border-blue-100 bg-blue-50/80 shadow-sm">
+            <CardContent className="p-4">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <div className="inline-flex items-center gap-2 text-sm font-medium text-blue-950">
+                  {isRefreshing ? <LoaderCircle className="size-4 animate-spin text-blue-600" /> : <CheckCircle2 className="size-4 text-emerald-600" />}
+                  <span>{isRefreshing ? "正在刷新账号信息和额度" : "账号刷新完成"}</span>
+                </div>
+                <div className="font-data text-sm font-semibold tabular-nums text-blue-700">
+                  {refreshProgressText}
+                </div>
+              </div>
+              <div className="mt-3 h-2 overflow-hidden rounded-full bg-white">
+                <div
+                  className="h-full rounded-full bg-blue-600 transition-[width] duration-300"
+                  style={{ width: `${refreshProgressPercent}%` }}
+                />
+              </div>
+              <div className="mt-2 flex flex-col gap-1 text-xs text-blue-900/70 sm:flex-row sm:items-center sm:justify-between">
+                <span className="truncate">
+                  {isRefreshing && refreshProgress.currentLabel ? `当前：${refreshProgress.currentLabel}` : "本次刷新已处理完成"}
+                </span>
+                <span className="font-data tabular-nums">
+                  成功 {refreshProgress.success} · 失败 {refreshProgress.fail}
+                </span>
+              </div>
+            </CardContent>
+          </Card>
+        ) : null}
         <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
           {metricCards.map((item) => {
             const Icon = item.icon;
@@ -844,6 +1027,24 @@ function AccountsPageContent() {
               </SelectTrigger>
               <SelectContent>
                 {accountStatusOptions.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Select
+              value={sortMode}
+              onValueChange={(value) => {
+                setSortMode(value as AccountSortMode);
+                setPage(1);
+              }}
+            >
+              <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 sm:w-[150px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {accountSortOptions.map((option) => (
                   <SelectItem key={option.value} value={option.value}>
                     {option.label}
                   </SelectItem>
@@ -1051,7 +1252,7 @@ function AccountsPageContent() {
                         </td>
                         <td className="px-4 py-3 text-xs leading-5 text-muted-foreground">
                           {(() => {
-                            const restore = formatRestoreAt(account.restore_at);
+                            const restore = formatRestoreAt(accountRestoreAt(account));
                             return (
                               <div className="space-y-0.5">
                                 {restore.relative ? <div className="font-medium text-foreground">{restore.relative}</div> : null}
