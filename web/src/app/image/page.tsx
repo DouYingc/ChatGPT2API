@@ -1889,7 +1889,6 @@ function ImagePageContent({ isAdmin, storageScope }: { isAdmin: boolean; storage
               availableQuota={availableQuota}
               activeTaskCount={activeTaskCount}
               showQuotaActions={!isAdmin}
-              onOpenQuotaShop={openQuotaShop}
               onQuotaRedeemed={loadQuota}
               referenceImages={referenceImages}
               textareaRef={textareaRef}
