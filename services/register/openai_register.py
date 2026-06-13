@@ -182,11 +182,11 @@ def _decode_jwt_payload(token: str) -> dict:
 
 
 def create_mailbox(username: str | None = None) -> dict:
-    return mail_provider.create_mailbox(config["mail"], username)
+    return mail_provider.create_mailbox(config["mail"], username, config["proxy"])
 
 
 def wait_for_code(mailbox: dict) -> str | None:
-    return mail_provider.wait_for_code(config["mail"], mailbox)
+    return mail_provider.wait_for_code(config["mail"], mailbox, config["proxy"])
 
 
 class SentinelTokenGenerator:

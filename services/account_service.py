@@ -587,7 +587,7 @@ class AccountService:
                 errors.append({"email": email, "error": "缺少邮箱地址，无法删除邮箱账号"})
                 continue
             try:
-                if mail_provider.delete_mailbox(openai_register.config["mail"], mailbox):
+                if mail_provider.delete_mailbox(openai_register.config["mail"], mailbox, openai_register.config["proxy"]):
                     removed += 1
                     log_service.add(LOG_TYPE_ACCOUNT, "删除异常账号对应邮箱", {"email": email})
             except Exception as exc:
