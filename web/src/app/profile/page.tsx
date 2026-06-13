@@ -2,9 +2,11 @@
 
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import {
+  ChevronDown,
   Copy,
   Eye,
   EyeOff,
+  ExternalLink,
   Gauge,
   Image as ImageIcon,
   KeyRound,
@@ -12,14 +14,18 @@ import {
   LockKeyhole,
   MessageSquare,
   RefreshCw,
+  Settings2,
   ShieldCheck,
+  Ticket,
   UserRound,
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { QuotaRedeemPopover } from "@/components/quota-popover";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { IMAGE_QUOTA_RULES, QUOTA_SHOP_URL } from "@/lib/billing";
 import { changeMyPassword, fetchMyIdentity, type AuthIdentity } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
@@ -122,6 +128,8 @@ function ProfilePageContent({ session }: { session: StoredAuthSession }) {
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [isChangingPassword, setIsChangingPassword] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showQuotaDetails, setShowQuotaDetails] = useState(false);
 
   const quotaRows = useMemo(() => (identity ? buildQuotaRows(identity) : []), [identity]);
 
@@ -185,6 +193,15 @@ function ProfilePageContent({ session }: { session: StoredAuthSession }) {
 
   const displayName = identity?.name || session.name || (session.role === "admin" ? "管理员" : "普通用户");
   const username = identity?.username || "";
+  const isUser = session.role === "user";
+  const canRedeemQuota = identity?.role === "user" && !identity.image_total_unlimited;
+  const imageTotalQuota = identity?.image_total_quota ?? 0;
+  const imageTotalUsed = identity?.image_total_used ?? 0;
+  const imageTotalRemaining = identity?.image_total_remaining;
+  const imageTotalUnlimited = Boolean(identity?.image_total_unlimited);
+  const imageTotalPercent = imageTotalUnlimited || imageTotalQuota <= 0
+    ? 0
+    : Math.max(0, Math.min(100, Math.round((imageTotalUsed / imageTotalQuota) * 100)));
 
   return (
     <div className="space-y-6 pb-12">
@@ -196,9 +213,9 @@ function ProfilePageContent({ session }: { session: StoredAuthSession }) {
             </span>
             <span className="h-px w-8 bg-border" />
           </div>
-          <h1 className="text-[26px] font-semibold tracking-tight text-foreground">账户中心</h1>
+          <h1 className="text-[26px] font-semibold tracking-tight text-foreground">{isUser ? "个人中心" : "账户中心"}</h1>
           <p className="text-[13px] text-muted-foreground">
-            查看当前账号、额度、API Key，并维护自己的登录密码。
+            {isUser ? "查看画图额度、购买兑换，并维护自己的登录密码。" : "查看当前账号、额度、API Key，并维护自己的登录密码。"}
           </p>
         </div>
         <Button
@@ -245,36 +262,15 @@ function ProfilePageContent({ session }: { session: StoredAuthSession }) {
               </div>
             </section>
 
-            <section className="rounded-2xl border border-stone-200 bg-white p-5 shadow-sm">
-              <div className="flex items-center gap-2 text-sm font-semibold text-stone-950">
-                <KeyRound className="size-4" />
-                API Key
-              </div>
-              <div className="mt-3 rounded-xl border border-stone-200 bg-stone-50 px-3 py-2">
-                <div className="break-all font-data text-[12px] leading-6 text-stone-700">
-                  {showKey ? session.key : maskKey(session.key)}
+            {!isUser ? (
+              <section className="rounded-2xl border border-stone-200 bg-white p-5 shadow-sm">
+                <div className="flex items-center gap-2 text-sm font-semibold text-stone-950">
+                  <KeyRound className="size-4" />
+                  API Key
                 </div>
-              </div>
-              <div className="mt-3 flex flex-wrap gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="h-9 rounded-xl border-stone-200 bg-white px-3 text-stone-700"
-                  onClick={() => setShowKey((value) => !value)}
-                >
-                  {showKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                  {showKey ? "隐藏" : "显示"}
-                </Button>
-                <Button
-                  type="button"
-                  className="h-9 rounded-xl bg-stone-950 px-3 text-white hover:bg-stone-800"
-                  onClick={() => void handleCopyKey()}
-                >
-                  <Copy className="size-4" />
-                  复制
-                </Button>
-              </div>
-            </section>
+                <ApiKeyPanel session={session} showKey={showKey} onToggleKey={() => setShowKey((value) => !value)} onCopyKey={handleCopyKey} />
+              </section>
+            ) : null}
 
             <section className="rounded-2xl border border-stone-200 bg-white p-5 shadow-sm">
               <div className="flex items-center gap-2 text-sm font-semibold text-stone-950">
@@ -322,21 +318,141 @@ function ProfilePageContent({ session }: { session: StoredAuthSession }) {
                 </div>
               )}
             </section>
+
+            {isUser ? (
+              <section className="rounded-2xl border border-stone-200 bg-white p-5 shadow-sm">
+                <button
+                  type="button"
+                  className="flex w-full cursor-pointer items-center justify-between gap-3 text-left"
+                  onClick={() => setShowAdvanced((value) => !value)}
+                >
+                  <div className="flex items-center gap-2 text-sm font-semibold text-stone-950">
+                    <Settings2 className="size-4" />
+                    高级设置
+                  </div>
+                  <ChevronDown className={cn("size-4 text-stone-400 transition", showAdvanced && "rotate-180")} />
+                </button>
+                {showAdvanced ? (
+                  <div className="mt-4 border-t border-stone-100 pt-4">
+                    <div className="flex items-center gap-2 text-sm font-semibold text-stone-950">
+                      <KeyRound className="size-4" />
+                      API Key
+                    </div>
+                    <p className="mt-1 text-xs leading-5 text-stone-500">
+                      只有接入第三方客户端或接口调用时才需要这里。
+                    </p>
+                    <ApiKeyPanel session={session} showKey={showKey} onToggleKey={() => setShowKey((value) => !value)} onCopyKey={handleCopyKey} />
+                  </div>
+                ) : null}
+              </section>
+            ) : null}
           </div>
 
           <section className="rounded-2xl border border-stone-200 bg-white p-5 shadow-sm">
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2 text-sm font-semibold text-stone-950">
-                <Gauge className="size-4" />
-                额度
-              </div>
-              <Badge variant="outline">实时余额</Badge>
-            </div>
-            <div className="mt-4 grid gap-3 md:grid-cols-2">
-              {quotaRows.map((row) => (
-                <QuotaTile key={row.key} row={row} />
-              ))}
-            </div>
+            {isUser && identity ? (
+              <>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 text-sm font-semibold text-stone-950">
+                    <Gauge className="size-4" />
+                    我的额度
+                  </div>
+                  <Badge variant="outline">实时余额</Badge>
+                </div>
+                <div className="mt-4 rounded-2xl border border-stone-200 bg-stone-50/80 p-4">
+                  <div className="flex flex-wrap items-end justify-between gap-3">
+                    <div>
+                      <div className="text-xs font-medium text-stone-500">画图可用额度</div>
+                      <div className="mt-2 font-data text-[38px] font-semibold leading-none text-stone-950">
+                        {imageTotalUnlimited ? "不限" : imageTotalRemaining ?? 0}
+                      </div>
+                    </div>
+                    <div className="text-right font-data text-xs text-stone-500">
+                      {imageTotalUnlimited ? `已用 ${imageTotalUsed}` : `已用 ${imageTotalUsed} / ${imageTotalQuota}`}
+                    </div>
+                  </div>
+                  {!imageTotalUnlimited ? (
+                    <div className="mt-4 h-2 overflow-hidden rounded-full bg-stone-200">
+                      <span className="block h-full rounded-full bg-emerald-500" style={{ width: `${imageTotalPercent}%` }} />
+                    </div>
+                  ) : null}
+                </div>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {canRedeemQuota ? (
+                    <>
+                      <a
+                        href={QUOTA_SHOP_URL}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-stone-200 bg-stone-950 px-4 text-sm font-semibold text-white transition hover:bg-stone-800"
+                      >
+                        <ExternalLink className="size-4" />
+                        购买额度
+                      </a>
+                      <QuotaRedeemPopover
+                        triggerLabel="兑换码"
+                        triggerTitle="兑换额度"
+                        triggerIcon={<Ticket className="size-4 shrink-0" />}
+                        triggerClassName="h-10 rounded-xl border-stone-200 bg-white px-4 text-sm text-stone-800 shadow-none hover:bg-stone-50"
+                        onRedeemed={setIdentity}
+                      />
+                    </>
+                  ) : null}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700"
+                    onClick={() => setShowQuotaDetails((value) => !value)}
+                  >
+                    详细额度
+                    <ChevronDown className={cn("size-4 transition", showQuotaDetails && "rotate-180")} />
+                  </Button>
+                </div>
+                <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5">
+                  <div className="flex flex-wrap items-center gap-2 text-[12px] font-medium text-amber-900">
+                    <span>购买额度</span>
+                    <span className="text-amber-500">→</span>
+                    <span>获得兑换码</span>
+                    <span className="text-amber-500">→</span>
+                    <span>回来兑换到账</span>
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {IMAGE_QUOTA_RULES.map((rule) => (
+                      <span
+                        key={rule.label}
+                        className="rounded-md border border-amber-200 bg-white/70 px-2 py-1 font-data text-[11px] font-semibold text-amber-800"
+                      >
+                        {rule.label}=扣 {rule.cost}
+                      </span>
+                    ))}
+                    <span className="rounded-md border border-emerald-200 bg-white/70 px-2 py-1 text-[11px] font-semibold text-emerald-700">
+                      失败自动返还
+                    </span>
+                  </div>
+                </div>
+                {showQuotaDetails ? (
+                  <div className="mt-4 grid gap-3 md:grid-cols-2">
+                    {quotaRows.map((row) => (
+                      <QuotaTile key={row.key} row={row} />
+                    ))}
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 text-sm font-semibold text-stone-950">
+                    <Gauge className="size-4" />
+                    额度
+                  </div>
+                  <Badge variant="outline">实时余额</Badge>
+                </div>
+                <div className="mt-4 grid gap-3 md:grid-cols-2">
+                  {quotaRows.map((row) => (
+                    <QuotaTile key={row.key} row={row} />
+                  ))}
+                </div>
+              </>
+            )}
           </section>
         </div>
       )}
@@ -352,6 +468,47 @@ function InfoRow({ label, value, mono = false }: { label: string; value: string;
         {value}
       </span>
     </div>
+  );
+}
+
+function ApiKeyPanel({
+  session,
+  showKey,
+  onToggleKey,
+  onCopyKey,
+}: {
+  session: StoredAuthSession;
+  showKey: boolean;
+  onToggleKey: () => void;
+  onCopyKey: () => void | Promise<void>;
+}) {
+  return (
+    <>
+      <div className="mt-3 rounded-xl border border-stone-200 bg-stone-50 px-3 py-2">
+        <div className="break-all font-data text-[12px] leading-6 text-stone-700">
+          {showKey ? session.key : maskKey(session.key)}
+        </div>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          className="h-9 rounded-xl border-stone-200 bg-white px-3 text-stone-700"
+          onClick={onToggleKey}
+        >
+          {showKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+          {showKey ? "隐藏" : "显示"}
+        </Button>
+        <Button
+          type="button"
+          className="h-9 rounded-xl bg-stone-950 px-3 text-white hover:bg-stone-800"
+          onClick={() => void onCopyKey()}
+        >
+          <Copy className="size-4" />
+          复制
+        </Button>
+      </div>
+    </>
   );
 }
 

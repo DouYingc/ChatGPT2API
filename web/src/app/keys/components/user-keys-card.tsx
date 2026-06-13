@@ -266,6 +266,19 @@ function formatDateTime(value?: string | null) {
   }).format(date);
 }
 
+function localDateKey(value?: string | null) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value).slice(0, 10);
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+function todayKey() {
+  return localDateKey(new Date().toISOString());
+}
+
 function readNumber(value: unknown): number {
   return Math.max(0, Math.floor(Number(value || 0)));
 }
@@ -289,7 +302,7 @@ function accountTierLabel(value?: string) {
   return value === "premium" ? "高级" : "普通";
 }
 
-export function UserKeysCard() {
+export function UserKeysCard({ createdFilter = "" }: { createdFilter?: "today" | "" } = {}) {
   const didLoadRef = useRef(false);
   const [items, setItemsState] = useState<UserKey[]>(() => cachedItems ?? []);
   const [isLoading, setIsLoading] = useState(() => cachedItems === null);
@@ -351,12 +364,19 @@ export function UserKeysCard() {
   }, [query]);
 
   const filteredItems = useMemo(() => {
-    if (!debouncedQuery) return items;
     return items.filter((item) => {
+      if (createdFilter === "today" && localDateKey(item.created_at) !== todayKey()) {
+        return false;
+      }
+      if (!debouncedQuery) return true;
       const username = String(item.username || "").toLowerCase();
       return item.name.toLowerCase().includes(debouncedQuery) || username.includes(debouncedQuery);
     });
-  }, [items, debouncedQuery]);
+  }, [createdFilter, items, debouncedQuery]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [createdFilter]);
 
   const pageCount = Math.max(1, Math.ceil(filteredItems.length / Number(pageSize)));
   const safePage = Math.min(page, pageCount);
@@ -649,6 +669,16 @@ export function UserKeysCard() {
                 <p className="text-sm text-stone-500">
                   画图与对话各自支持日限额、月限额、总额度三档；任一档可独立勾选「不限额」。
                 </p>
+                {createdFilter === "today" ? (
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <Badge variant="info" className="rounded-md">
+                      今日注册
+                    </Badge>
+                    <a href="/keys" className="text-xs font-medium text-stone-500 hover:text-stone-900">
+                      清除筛选
+                    </a>
+                  </div>
+                ) : null}
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2">

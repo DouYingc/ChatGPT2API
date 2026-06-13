@@ -1,6 +1,7 @@
 "use client";
 
 import { LoaderCircle } from "lucide-react";
+import { useSearchParams } from "next/navigation";
 
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
@@ -9,6 +10,9 @@ import { QuotaLedgerCard } from "./components/quota-ledger-card";
 import { UserKeysCard } from "./components/user-keys-card";
 
 function KeysPageContent() {
+  const searchParams = useSearchParams();
+  const createdFilter = searchParams.get("created") === "today" ? "today" : "";
+
   return (
     <>
       <section className="mt-4 mb-2 flex flex-col gap-1 sm:mt-6 lg:flex-row lg:items-end lg:justify-between">
@@ -26,7 +30,7 @@ function KeysPageContent() {
         </div>
       </section>
       <section className="space-y-5 pb-12">
-        <UserKeysCard />
+        <UserKeysCard createdFilter={createdFilter} />
         <QuotaLedgerCard />
         <RedeemCodesCard />
       </section>

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { ChevronLeft, ChevronRight, ImageIcon, LoaderCircle, RefreshCw, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -27,6 +28,48 @@ const typeLabels: Record<string, string> = {
   [LogType.Account]: "账号管理日志",
 };
 
+type CallStatusFilter = "all" | "success" | "failed";
+type CallKindFilter = "all" | "image" | "text";
+type ResolutionFilter = "all" | "1k" | "2k" | "4k" | "unknown";
+type ImageRouteFilter = "all" | "pool" | "relay" | "unknown";
+type ErrorKindFilter = "all" | "relay" | "account_limit" | "network" | "content_policy" | "other";
+
+const callStatusOptions: { label: string; value: CallStatusFilter }[] = [
+  { label: "全部状态", value: "all" },
+  { label: "成功", value: "success" },
+  { label: "失败", value: "failed" },
+];
+
+const callKindOptions: { label: string; value: CallKindFilter }[] = [
+  { label: "全部调用", value: "all" },
+  { label: "只看生图", value: "image" },
+  { label: "只看文本", value: "text" },
+];
+
+const resolutionOptions: { label: string; value: ResolutionFilter }[] = [
+  { label: "全部清晰度", value: "all" },
+  { label: "1K", value: "1k" },
+  { label: "2K", value: "2k" },
+  { label: "4K", value: "4k" },
+  { label: "未知", value: "unknown" },
+];
+
+const imageRouteOptions: { label: string; value: ImageRouteFilter }[] = [
+  { label: "全部渠道", value: "all" },
+  { label: "号池", value: "pool" },
+  { label: "中转", value: "relay" },
+  { label: "未知渠道", value: "unknown" },
+];
+
+const errorKindOptions: { label: string; value: ErrorKindFilter }[] = [
+  { label: "全部错误", value: "all" },
+  { label: "中转失败", value: "relay" },
+  { label: "账号/额度", value: "account_limit" },
+  { label: "网络断连", value: "network" },
+  { label: "内容策略", value: "content_policy" },
+  { label: "其他错误", value: "other" },
+];
+
 function getDetailText(item: SystemLog, key: string) {
   const value = item.detail?.[key];
   return typeof value === "string" || typeof value === "number" ? String(value) : "-";
@@ -49,6 +92,146 @@ function getStatus(item: SystemLog) {
   return "-";
 }
 
+function getStatusFilterValue(item: SystemLog): CallStatusFilter | "unknown" {
+  const status = item.detail?.status;
+  if (status === "success" || status === "failed") return status;
+  return "unknown";
+}
+
+function isImageCallLog(item: SystemLog) {
+  const endpoint = String(item.detail?.endpoint || "").toLowerCase();
+  const summary = String(item.summary || "");
+  return endpoint.includes("/images/") || endpoint.includes("/image-tasks/") || summary.includes("生图");
+}
+
+function normalizeResolution(value: unknown): ResolutionFilter {
+  const text = String(value || "").trim().toLowerCase().replace(/\s+/g, "");
+  if (text === "1k" || text === "2k" || text === "4k") return text;
+  if (text.includes("4096") || text.includes("4k")) return "4k";
+  if (text.includes("2048") || text.includes("2k")) return "2k";
+  if (text.includes("1024") || text.includes("1k")) return "1k";
+  return "unknown";
+}
+
+function getResolution(item: SystemLog): ResolutionFilter {
+  const resolution = normalizeResolution(item.detail?.resolution);
+  if (resolution !== "unknown") return resolution;
+  return normalizeResolution(item.detail?.size);
+}
+
+function getImageRoute(item: SystemLog): ImageRouteFilter {
+  const route = String(item.detail?.image_route || item.detail?.route || "").trim().toLowerCase();
+  if (route === "pool" || route === "relay") return route;
+  const error = String(item.detail?.error || "").toLowerCase();
+  if (error.includes("中转") || error.includes("duck") || error.includes("relay")) return "relay";
+  return "unknown";
+}
+
+function getErrorKind(item: SystemLog): ErrorKindFilter | "none" {
+  if (item.detail?.status !== "failed") return "none";
+  const error = String(item.detail?.error || item.summary || "").toLowerCase();
+  if (error.includes("中转") || error.includes("duck") || error.includes("relay")) return "relay";
+  if (
+    error.includes("quota")
+    || error.includes("free plan limit")
+    || error.includes("no available image")
+    || error.includes("usage_limit")
+    || error.includes("rate_limit")
+    || error.includes("限流")
+    || error.includes("额度")
+  ) {
+    return "account_limit";
+  }
+  if (
+    error.includes("socket")
+    || error.includes("econnreset")
+    || error.includes("und_err")
+    || error.includes("timeout")
+    || error.includes("connection")
+    || error.includes("fetch failed")
+  ) {
+    return "network";
+  }
+  if (
+    error.includes("content_policy")
+    || error.includes("policy")
+    || error.includes("blocked")
+    || error.includes("rejected")
+    || error.includes("敏感")
+  ) {
+    return "content_policy";
+  }
+  return "other";
+}
+
+function errorKindLabel(kind: ReturnType<typeof getErrorKind>) {
+  if (kind === "relay") return "中转失败";
+  if (kind === "account_limit") return "账号/额度";
+  if (kind === "network") return "网络断连";
+  if (kind === "content_policy") return "内容策略";
+  if (kind === "other") return "其他错误";
+  return "";
+}
+
+function routeLabel(route: ImageRouteFilter) {
+  if (route === "pool") return "号池";
+  if (route === "relay") return "中转";
+  return "未知渠道";
+}
+
+function resolutionLabel(resolution: ResolutionFilter) {
+  return resolution === "unknown" ? "未知清晰度" : resolution.toUpperCase();
+}
+
+function todayKey() {
+  const date = new Date();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+function normalizeDateParam(value: string | null) {
+  if (!value) return "";
+  return value === "today" ? todayKey() : value;
+}
+
+function parseLogFilters(params: URLSearchParams) {
+  const status = params.get("status");
+  const kind = params.get("kind");
+  const resolution = params.get("resolution");
+  const route = params.get("route");
+  const error = params.get("error");
+  const date = normalizeDateParam(params.get("date"));
+  const startDate = normalizeDateParam(params.get("start_date")) || date;
+  const endDate = normalizeDateParam(params.get("end_date")) || date;
+  return {
+    type: params.get("type") || LogType.Call,
+    startDate,
+    endDate,
+    callStatusFilter: status === "success" || status === "failed" ? status : "all",
+    callKindFilter: kind === "image" || kind === "text" ? kind : "all",
+    resolutionFilter:
+      resolution === "1k" || resolution === "2k" || resolution === "4k" || resolution === "unknown"
+        ? resolution
+        : "all",
+    imageRouteFilter:
+      route === "pool" || route === "relay" || route === "unknown" ? route : "all",
+    errorKindFilter:
+      error === "relay" || error === "account_limit" || error === "network" || error === "content_policy" || error === "other"
+        ? error
+        : "all",
+  } satisfies {
+    type: string;
+    startDate: string;
+    endDate: string;
+    callStatusFilter: CallStatusFilter;
+    callKindFilter: CallKindFilter;
+    resolutionFilter: ResolutionFilter;
+    imageRouteFilter: ImageRouteFilter;
+    errorKindFilter: ErrorKindFilter;
+  };
+}
+
 // 模块级缓存：路由切换会让 LogsContent 重新挂载，
 // 不缓存的话每次切回都会从 items=[] / isLoading=true 起跳，
 // 表格高度从 0 撑到 N 行，体感"跳一下"。
@@ -61,12 +244,19 @@ type LogsCache = {
 let cachedLogs: LogsCache | null = null;
 
 function LogsContent() {
+  const searchParams = useSearchParams();
+  const initialFilters = useMemo(() => parseLogFilters(searchParams), [searchParams]);
   // 命中缓存时直接拿来当初始 state；filter 也按上次结果回填，
   // 避免切回 logs 页 type/startDate/endDate 重置后立即触发一次空查询。
   const [items, setItemsState] = useState<SystemLog[]>(() => cachedLogs?.items ?? []);
-  const [type, setType] = useState<string>(() => cachedLogs?.type ?? LogType.Call);
-  const [startDate, setStartDate] = useState(() => cachedLogs?.startDate ?? "");
-  const [endDate, setEndDate] = useState(() => cachedLogs?.endDate ?? "");
+  const [type, setType] = useState<string>(() => initialFilters.type || cachedLogs?.type || LogType.Call);
+  const [startDate, setStartDate] = useState(() => initialFilters.startDate || cachedLogs?.startDate || "");
+  const [endDate, setEndDate] = useState(() => initialFilters.endDate || cachedLogs?.endDate || "");
+  const [callStatusFilter, setCallStatusFilter] = useState<CallStatusFilter>(initialFilters.callStatusFilter);
+  const [callKindFilter, setCallKindFilter] = useState<CallKindFilter>(initialFilters.callKindFilter);
+  const [resolutionFilter, setResolutionFilter] = useState<ResolutionFilter>(initialFilters.resolutionFilter);
+  const [imageRouteFilter, setImageRouteFilter] = useState<ImageRouteFilter>(initialFilters.imageRouteFilter);
+  const [errorKindFilter, setErrorKindFilter] = useState<ErrorKindFilter>(initialFilters.errorKindFilter);
   const [detailLog, setDetailLog] = useState<SystemLog | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(0);
@@ -80,12 +270,28 @@ function LogsContent() {
   const detailImages = detailUrls.map((url, index) => ({ id: `${index}`, src: url }));
   const isCallLog = type === LogType.Call;
   const pageSize = 10;
-  const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
-  const safePage = Math.min(page, pageCount);
-  const currentRows = items.slice((safePage - 1) * pageSize, safePage * pageSize);
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const filteredItems = useMemo(() => {
+    if (!isCallLog) return items;
+    return items.filter((item) => {
+      if (callStatusFilter !== "all" && getStatusFilterValue(item) !== callStatusFilter) return false;
+      if (callKindFilter === "image" && !isImageCallLog(item)) return false;
+      if (callKindFilter === "text" && isImageCallLog(item)) return false;
+      if (resolutionFilter !== "all") {
+        if (!isImageCallLog(item) || getResolution(item) !== resolutionFilter) return false;
+      }
+      if (imageRouteFilter !== "all") {
+        if (!isImageCallLog(item) || getImageRoute(item) !== imageRouteFilter) return false;
+      }
+      if (errorKindFilter !== "all" && getErrorKind(item) !== errorKindFilter) return false;
+      return true;
+    });
+  }, [callKindFilter, callStatusFilter, errorKindFilter, imageRouteFilter, isCallLog, items, resolutionFilter]);
+  const pageCount = Math.max(1, Math.ceil(filteredItems.length / pageSize));
+  const safePage = Math.min(page, pageCount);
+  const currentRows = filteredItems.slice((safePage - 1) * pageSize, safePage * pageSize);
   const currentPageSelected = currentRows.length > 0 && currentRows.every((item) => selectedSet.has(item.id));
-  const allSelected = items.length > 0 && items.every((item) => selectedSet.has(item.id));
+  const allSelected = filteredItems.length > 0 && filteredItems.every((item) => selectedSet.has(item.id));
 
   // 写入 items 同步刷新缓存，下次切回 logs 页能拿到最新值。
   const setItems = (next: SystemLog[]) => {
@@ -110,6 +316,11 @@ function LogsContent() {
   const clearFilters = () => {
     setStartDate("");
     setEndDate("");
+    setCallStatusFilter("all");
+    setCallKindFilter("all");
+    setResolutionFilter("all");
+    setImageRouteFilter("all");
+    setErrorKindFilter("all");
   };
 
   const openDetail = (item: SystemLog) => {
@@ -162,6 +373,26 @@ function LogsContent() {
     void loadLogs(isFirst && cacheMatches);
   }, [type, startDate, endDate]);
 
+  useEffect(() => {
+    const query = searchParams.toString();
+    if (!query) return;
+    const next = parseLogFilters(searchParams);
+    setType(next.type);
+    setStartDate(next.startDate);
+    setEndDate(next.endDate);
+    setCallStatusFilter(next.callStatusFilter);
+    setCallKindFilter(next.callKindFilter);
+    setResolutionFilter(next.resolutionFilter);
+    setImageRouteFilter(next.imageRouteFilter);
+    setErrorKindFilter(next.errorKindFilter);
+    setPage(1);
+  }, [searchParams]);
+
+  useEffect(() => {
+    setPage(1);
+    setSelectedIds([]);
+  }, [callKindFilter, callStatusFilter, errorKindFilter, imageRouteFilter, resolutionFilter, type]);
+
   return (
     <section className="mt-4 space-y-5 sm:mt-6">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
@@ -178,6 +409,50 @@ function LogsContent() {
             </SelectContent>
           </Select>
           <DateRangeFilter startDate={startDate} endDate={endDate} onChange={(start, end) => { setStartDate(start); setEndDate(end); }} />
+          {isCallLog ? (
+            <>
+              <Select value={callStatusFilter} onValueChange={(value) => setCallStatusFilter(value as CallStatusFilter)}>
+                <SelectTrigger className="h-10 w-[120px] rounded-xl border-stone-200 bg-white"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {callStatusOptions.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Select value={callKindFilter} onValueChange={(value) => setCallKindFilter(value as CallKindFilter)}>
+                <SelectTrigger className="h-10 w-[120px] rounded-xl border-stone-200 bg-white"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {callKindOptions.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Select value={resolutionFilter} onValueChange={(value) => setResolutionFilter(value as ResolutionFilter)}>
+                <SelectTrigger className="h-10 w-[132px] rounded-xl border-stone-200 bg-white"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {resolutionOptions.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Select value={imageRouteFilter} onValueChange={(value) => setImageRouteFilter(value as ImageRouteFilter)}>
+                <SelectTrigger className="h-10 w-[120px] rounded-xl border-stone-200 bg-white"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {imageRouteOptions.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Select value={errorKindFilter} onValueChange={(value) => setErrorKindFilter(value as ErrorKindFilter)}>
+                <SelectTrigger className="h-10 w-[132px] rounded-xl border-stone-200 bg-white"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {errorKindOptions.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </>
+          ) : null}
           <Button variant="outline" onClick={clearFilters} className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700">
             清除筛选条件
           </Button>
@@ -192,13 +467,15 @@ function LogsContent() {
         <CardContent className="p-0">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-100 px-5 py-4">
             <div className="flex flex-wrap items-center gap-3 text-sm text-stone-600">
-              <span>共 {items.length} 条</span>
+              <span>
+                共 {filteredItems.length} 条{filteredItems.length !== items.length ? ` / 原始 ${items.length} 条` : ""}
+              </span>
               <label className="flex items-center gap-2">
                 <Checkbox checked={currentPageSelected} onCheckedChange={(checked) => toggleIds(currentRows.map((item) => item.id), Boolean(checked))} />
                 本页全选
               </label>
               <label className="flex items-center gap-2">
-                <Checkbox checked={allSelected} onCheckedChange={(checked) => toggleIds(items.map((item) => item.id), Boolean(checked))} />
+                <Checkbox checked={allSelected} onCheckedChange={(checked) => toggleIds(filteredItems.map((item) => item.id), Boolean(checked))} />
                 全选结果
               </label>
               {selectedIds.length > 0 ? <span>已选 {selectedIds.length} 条</span> : null}
@@ -218,7 +495,7 @@ function LogsContent() {
             </div>
           </div>
           <div className="overflow-x-auto">
-            <Table className="min-w-[900px]">
+            <Table className="min-w-[1120px]">
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-12"></TableHead>
@@ -227,6 +504,7 @@ function LogsContent() {
                   {isCallLog ? <TableHead>令牌名称</TableHead> : null}
                   {isCallLog ? <TableHead>调用耗时</TableHead> : null}
                   {isCallLog ? <TableHead>状态</TableHead> : null}
+                  {isCallLog ? <TableHead className="w-56">标签</TableHead> : null}
                   {isCallLog ? <TableHead className="w-36">图片</TableHead> : null}
                   <TableHead>简述</TableHead>
                   <TableHead className="w-40">操作</TableHead>
@@ -235,6 +513,10 @@ function LogsContent() {
               <TableBody>
                 {currentRows.map((item) => {
                   const urls = getUrls(item);
+                  const resolution = getResolution(item);
+                  const route = getImageRoute(item);
+                  const errorKind = getErrorKind(item);
+                  const quotaCost = item.detail?.quota_cost;
                   return (
                     <TableRow key={item.id} className="text-stone-600">
                       <TableCell>
@@ -249,6 +531,36 @@ function LogsContent() {
                           <Badge variant={item.detail?.status === "failed" ? "danger" : "success"} className="rounded-md">
                             {getStatus(item)}
                           </Badge>
+                        </TableCell>
+                      ) : null}
+                      {isCallLog ? (
+                        <TableCell>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {isImageCallLog(item) ? (
+                              <>
+                                <Badge variant="secondary" className="rounded-md bg-blue-50 text-blue-700">
+                                  {resolutionLabel(resolution)}
+                                </Badge>
+                                <Badge variant="secondary" className="rounded-md bg-stone-100 text-stone-600">
+                                  {routeLabel(route)}
+                                </Badge>
+                                {typeof quotaCost === "number" ? (
+                                  <Badge variant="outline" className="rounded-md border-amber-200 bg-amber-50 text-amber-700">
+                                    扣 {quotaCost}
+                                  </Badge>
+                                ) : null}
+                              </>
+                            ) : (
+                              <Badge variant="secondary" className="rounded-md bg-stone-100 text-stone-500">
+                                文本
+                              </Badge>
+                            )}
+                            {errorKind !== "none" ? (
+                              <Badge variant="danger" className="rounded-md">
+                                {errorKindLabel(errorKind)}
+                              </Badge>
+                            ) : null}
+                          </div>
                         </TableCell>
                       ) : null}
                       {isCallLog ? (
@@ -294,7 +606,7 @@ function LogsContent() {
             </Table>
           </div>
           <div className="flex items-center justify-end gap-2 border-t border-stone-100 px-4 py-3 text-sm text-stone-500">
-            <span>第 {safePage} / {pageCount} 页，共 {items.length} 条</span>
+            <span>第 {safePage} / {pageCount} 页，共 {filteredItems.length} 条</span>
             <Button variant="outline" size="icon" className="size-9 rounded-lg border-stone-200 bg-white" disabled={safePage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
               <ChevronLeft className="size-4" />
             </Button>
@@ -302,7 +614,7 @@ function LogsContent() {
               <ChevronRight className="size-4" />
             </Button>
           </div>
-          {!isLoading && items.length === 0 ? <div className="px-6 py-14 text-center text-sm text-stone-500">没有找到日志</div> : null}
+          {!isLoading && filteredItems.length === 0 ? <div className="px-6 py-14 text-center text-sm text-stone-500">没有找到日志</div> : null}
         </CardContent>
       </Card>
       <Dialog open={detailOpen} onOpenChange={setDetailOpen}>

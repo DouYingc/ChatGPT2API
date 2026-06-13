@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   CalendarClock,
   CalendarDays,
@@ -37,6 +37,17 @@ type QuotaRow = {
   unlimited: boolean;
   remaining: number | null;
 };
+
+type QuotaPopoverProps = {
+  triggerLabel?: string;
+  triggerTitle?: string;
+  triggerIcon?: ReactNode;
+  triggerClassName?: string;
+  align?: "start" | "center" | "end";
+  onRedeemed?: (identity: AuthIdentity) => void | Promise<void>;
+};
+
+type QuotaRedeemPopoverProps = QuotaPopoverProps;
 
 function buildRows(identity: AuthIdentity): QuotaRow[] {
   return [
@@ -103,12 +114,20 @@ function buildRows(identity: AuthIdentity): QuotaRow[] {
   ];
 }
 
-export function QuotaPopover() {
+export function QuotaPopover({
+  triggerLabel = "额度",
+  triggerTitle = "查看额度",
+  triggerIcon,
+  triggerClassName,
+  align = "end",
+  onRedeemed,
+}: QuotaPopoverProps = {}) {
   const [open, setOpen] = useState(false);
   const [identity, setIdentity] = useState<AuthIdentity | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isRedeeming, setIsRedeeming] = useState(false);
   const [redeemCode, setRedeemCode] = useState("");
+  const [redeemStatus, setRedeemStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -136,36 +155,50 @@ export function QuotaPopover() {
   const handleRedeem = async () => {
     const normalizedCode = redeemCode.trim();
     if (!normalizedCode) {
-      toast.error("请输入兑换码");
+      setRedeemStatus({ type: "error", message: "请输入兑换码" });
       return;
     }
     setIsRedeeming(true);
+    setRedeemStatus(null);
     try {
       const data = await redeemQuotaCode(normalizedCode);
       setIdentity(data.identity);
+      void onRedeemed?.(data.identity);
       setRedeemCode("");
+      setRedeemStatus({ type: "success", message: `兑换成功，画图总额度 +${data.amount}，已到账` });
       toast.success(`兑换成功，画图总额度 +${data.amount}`);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "兑换失败");
+      const message = err instanceof Error ? err.message : "兑换失败";
+      setRedeemStatus({ type: "error", message });
+      toast.error(message);
     } finally {
       setIsRedeeming(false);
     }
   };
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover
+      open={open}
+      onOpenChange={(nextOpen) => {
+        setOpen(nextOpen);
+        if (!nextOpen) setRedeemStatus(null);
+      }}
+    >
       <PopoverTrigger asChild>
         <button
           type="button"
-          aria-label="查看额度使用情况"
-          title="查看额度"
-          className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border border-border/70 bg-card px-2.5 text-[12px] font-bold leading-none text-foreground shadow-sm transition hover:border-foreground/20 hover:bg-secondary"
+          aria-label={triggerTitle}
+          title={triggerTitle}
+          className={cn(
+            "inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border border-border/70 bg-card px-2.5 text-[12px] font-bold leading-none text-foreground shadow-sm transition hover:border-foreground/20 hover:bg-secondary",
+            triggerClassName,
+          )}
         >
-          <Gauge className="size-3.5 shrink-0" />
-          <span>额度</span>
+          {triggerIcon ?? <Gauge className="size-3.5 shrink-0" />}
+          <span>{triggerLabel}</span>
         </button>
       </PopoverTrigger>
-      <PopoverContent align="end" sideOffset={8} className="w-[320px] p-0">
+      <PopoverContent align={align} sideOffset={8} className="w-[320px] p-0">
         <div className="border-b border-stone-100 px-4 py-3">
           <div className="text-sm font-semibold text-stone-900">额度使用情况</div>
           <p className="mt-0.5 text-xs leading-5 text-stone-500">
@@ -220,7 +253,10 @@ export function QuotaPopover() {
                   <div className="flex gap-2">
                     <Input
                       value={redeemCode}
-                      onChange={(event) => setRedeemCode(event.target.value)}
+                      onChange={(event) => {
+                        setRedeemCode(event.target.value);
+                        if (redeemStatus?.type === "error") setRedeemStatus(null);
+                      }}
                       onKeyDown={(event) => {
                         if (event.key === "Enter") {
                           void handleRedeem();
@@ -239,10 +275,146 @@ export function QuotaPopover() {
                       兑换
                     </Button>
                   </div>
+                  {redeemStatus ? (
+                    <div
+                      className={cn(
+                        "mt-2 rounded-lg px-3 py-2 text-[12px] leading-5",
+                        redeemStatus.type === "success"
+                          ? "border border-emerald-200 bg-emerald-50 text-emerald-700"
+                          : "border border-rose-200 bg-rose-50 text-rose-700",
+                      )}
+                    >
+                      {redeemStatus.message}
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
             </div>
           ) : null}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+export function QuotaRedeemPopover({
+  triggerLabel = "兑换码",
+  triggerTitle = "兑换额度",
+  triggerIcon,
+  triggerClassName,
+  align = "end",
+  onRedeemed,
+}: QuotaRedeemPopoverProps = {}) {
+  const [open, setOpen] = useState(false);
+  const [redeemCode, setRedeemCode] = useState("");
+  const [isRedeeming, setIsRedeeming] = useState(false);
+  const [redeemStatus, setRedeemStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
+
+  const handleRedeem = async () => {
+    const normalizedCode = redeemCode.trim();
+    if (!normalizedCode) {
+      setRedeemStatus({ type: "error", message: "请输入兑换码" });
+      return;
+    }
+    setIsRedeeming(true);
+    setRedeemStatus(null);
+    try {
+      const data = await redeemQuotaCode(normalizedCode);
+      await onRedeemed?.(data.identity);
+      setRedeemCode("");
+      setRedeemStatus({ type: "success", message: `兑换成功，画图总额度 +${data.amount}，已到账` });
+      toast.success(`兑换成功，画图总额度 +${data.amount}`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "兑换失败";
+      setRedeemStatus({ type: "error", message });
+      toast.error(message);
+    } finally {
+      setIsRedeeming(false);
+    }
+  };
+
+  return (
+    <Popover
+      open={open}
+      onOpenChange={(nextOpen) => {
+        setOpen(nextOpen);
+        if (!nextOpen) setRedeemStatus(null);
+      }}
+    >
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label={triggerTitle}
+          title={triggerTitle}
+          className={cn(
+            "inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border border-border/70 bg-card px-2.5 text-[12px] font-bold leading-none text-foreground shadow-sm transition hover:border-foreground/20 hover:bg-secondary",
+            triggerClassName,
+          )}
+        >
+          {triggerIcon ?? <Ticket className="size-3.5 shrink-0" />}
+          <span>{triggerLabel}</span>
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align={align} sideOffset={8} className="w-[300px] p-0">
+        <div className="border-b border-stone-100 px-4 py-3">
+          <div className="flex items-center gap-2 text-sm font-semibold text-stone-900">
+            <Ticket className="size-4 text-stone-500" />
+            兑换画图额度
+          </div>
+          <p className="mt-1 text-xs leading-5 text-stone-500">
+            购买额度后会获得兑换码，输入后立即到账。
+          </p>
+        </div>
+        <div className="space-y-3 px-4 py-3">
+          <div className="flex gap-2">
+            <Input
+              value={redeemCode}
+              onChange={(event) => {
+                setRedeemCode(event.target.value);
+                if (redeemStatus?.type === "error") setRedeemStatus(null);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  void handleRedeem();
+                }
+              }}
+              placeholder="输入兑换码"
+              className="h-9 rounded-lg border-stone-200 bg-white font-data text-[12px] shadow-none"
+            />
+            <Button
+              type="button"
+              className="h-9 rounded-lg bg-stone-950 px-3 text-white hover:bg-stone-800"
+              onClick={() => void handleRedeem()}
+              disabled={isRedeeming}
+            >
+              {isRedeeming ? <LoaderCircle className="size-3.5 animate-spin" /> : null}
+              兑换
+            </Button>
+          </div>
+          {redeemStatus ? (
+            <div
+              className={cn(
+                "rounded-lg px-3 py-2 text-[12px] leading-5",
+                redeemStatus.type === "success"
+                  ? "border border-emerald-200 bg-emerald-50 text-emerald-700"
+                  : "border border-rose-200 bg-rose-50 text-rose-700",
+              )}
+            >
+              {redeemStatus.message}
+            </div>
+          ) : null}
+          <div className="flex items-center justify-between gap-2 text-[11px] text-stone-500">
+            <span>失败任务会自动返还预扣额度。</span>
+            <a
+              href={QUOTA_SHOP_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex shrink-0 items-center gap-1 font-medium text-stone-900 hover:text-stone-700"
+            >
+              购买
+              <ExternalLink className="size-3" />
+            </a>
+          </div>
         </div>
       </PopoverContent>
     </Popover>
