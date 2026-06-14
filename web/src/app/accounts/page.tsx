@@ -652,11 +652,6 @@ function AccountsPageContent() {
     ? `${Math.min(refreshProgress.done >= refreshProgress.total ? refreshProgress.total : refreshProgress.current, refreshProgress.total)}/${refreshProgress.total}`
     : "";
 
-  const accountLabelByToken = (token: string) => {
-    const account = accounts.find((item) => item.access_token === token);
-    return account?.email || maskToken(token);
-  };
-
   const abnormalTokens = useMemo(() => {
     return accounts.filter((item) => item.status === "异常").map((item) => item.access_token);
   }, [accounts]);
@@ -711,61 +706,44 @@ function AccountsPageContent() {
     setRefreshProgress({
       total: tokens.length,
       done: 0,
-      current: 1,
-      currentLabel: accountLabelByToken(tokens[0]),
+      current: 0,
+      currentLabel: "后端并发刷新中",
       success: 0,
       fail: 0,
     });
 
-    let refreshed = 0;
-    const errors: Array<{ access_token: string; error: string }> = [];
-
     try {
-      for (let index = 0; index < tokens.length; index += 1) {
-        const token = tokens[index];
-        setRefreshProgress({
-          total: tokens.length,
-          done: index,
-          current: index + 1,
-          currentLabel: accountLabelByToken(token),
-          success: refreshed,
-          fail: errors.length,
-        });
+      const data = await refreshAccounts(tokens);
+      setAccounts(data.items);
+      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
+      setRefreshProgress({
+        total: tokens.length,
+        done: tokens.length,
+        current: tokens.length,
+        currentLabel: "",
+        success: data.refreshed,
+        fail: data.errors.length,
+      });
 
-        try {
-          const data = await refreshAccounts([token]);
-          refreshed += data.refreshed;
-          errors.push(
-            ...data.errors.map((item) => ({
-              access_token: item.access_token,
-              error: item.error,
-            })),
-          );
-          setAccounts(data.items);
-          setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
-        } catch (error) {
-          const message = error instanceof Error ? error.message : "刷新账户失败";
-          errors.push({ access_token: token, error: message });
-        }
-
-        setRefreshProgress({
-          total: tokens.length,
-          done: index + 1,
-          current: Math.min(index + 2, tokens.length),
-          currentLabel: tokens[index + 1] ? accountLabelByToken(tokens[index + 1]) : "",
-          success: refreshed,
-          fail: errors.length,
-        });
-      }
-
-      if (errors.length > 0) {
-        const firstError = errors[0]?.error;
+      if (data.errors.length > 0) {
+        const firstError = data.errors[0]?.error;
         toast.error(
-          `刷新成功 ${refreshed} 个，失败 ${errors.length} 个${firstError ? `，首个错误：${firstError}` : ""}`,
+          `刷新成功 ${data.refreshed} 个，失败 ${data.errors.length} 个${firstError ? `，首个错误：${firstError}` : ""}`,
         );
       } else {
-        toast.success(`刷新成功 ${refreshed} 个账户`);
+        toast.success(`刷新成功 ${data.refreshed} 个账户`);
       }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "刷新账户失败";
+      setRefreshProgress({
+        total: tokens.length,
+        done: tokens.length,
+        current: tokens.length,
+        currentLabel: "",
+        success: 0,
+        fail: tokens.length,
+      });
+      toast.error(message);
     } finally {
       setIsRefreshing(false);
       refreshProgressClearTimerRef.current = setTimeout(() => {
