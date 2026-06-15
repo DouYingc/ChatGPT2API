@@ -78,6 +78,16 @@ GET /api/admin/overview
 - 1K 任务不受这个限制影响。
 - 当前限制是单进程内限制；如果以后服务扩成多副本，需要再做跨进程队列。
 
+## 2K/4K 参考图上传
+
+2K/4K 带参考图时会走中转接口的 `/images/edits`，请求格式为 multipart。
+
+注意事项：
+
+- 这条路径不再使用 `curl_cffi` 的 `files=` 参数，避免出现 `files is not supported, use multipart`。
+- multipart 请求由 Node helper 发送，和 2K/4K 文生图一样会读取全局代理配置。
+- 日志中的 `proxy_used=true/false` 可以用于判断请求是否实际走了代理。
+
 ## 本地常用验证命令
 
 ```powershell

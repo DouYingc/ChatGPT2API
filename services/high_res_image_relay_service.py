@@ -724,19 +724,7 @@ class HighResImageRelayService:
             raise RuntimeError("流式中转接口未返回最终图片数据")
         return int(time.time()), completed_items
 
-    def _post_json_with_node_fetch(
-        self,
-        relay: dict[str, object],
-        resource: str,
-        body: dict[str, object],
-    ) -> tuple[int, list[dict[str, object]]]:
-        request_payload = {
-            "url": _api_url(_clean(relay.get("base_url")), resource),
-            "apiKey": _clean(relay.get("api_key")),
-            "body": body,
-            "timeoutMs": HIGH_RES_RELAY_TIMEOUT_SECONDS * 1000,
-            "proxy": _outbound_proxy(),
-        }
+    def _request_with_node_fetch(self, request_payload: dict[str, object]) -> dict[str, object]:
         try:
             completed = subprocess.run(
                 ["node", str(NODE_FETCH_SCRIPT)],
@@ -761,6 +749,22 @@ class HighResImageRelayService:
             raise RuntimeError(f"Node fetch helper returned invalid JSON: {stdout[:300]}") from exc
         if not isinstance(result, dict):
             raise RuntimeError("Node fetch helper returned invalid payload")
+        return result
+
+    def _post_json_with_node_fetch(
+        self,
+        relay: dict[str, object],
+        resource: str,
+        body: dict[str, object],
+    ) -> tuple[int, list[dict[str, object]]]:
+        request_payload = {
+            "url": _api_url(_clean(relay.get("base_url")), resource),
+            "apiKey": _clean(relay.get("api_key")),
+            "body": body,
+            "timeoutMs": HIGH_RES_RELAY_TIMEOUT_SECONDS * 1000,
+            "proxy": _outbound_proxy(),
+        }
+        result = self._request_with_node_fetch(request_payload)
         if result.get("networkError"):
             parts = [
                 _clean(result.get("networkError")) or "Node fetch network error",
@@ -788,6 +792,55 @@ class HighResImageRelayService:
                 except Exception:
                     payload = text
             return self._normalize_response_items(session, payload, _clean(body.get("prompt")))
+        finally:
+            session.close()
+
+    def _post_multipart_with_node_fetch(
+        self,
+        relay: dict[str, object],
+        resource: str,
+        data: dict[str, object],
+        images: list[str],
+        image_field: str,
+    ) -> tuple[int, list[dict[str, object]]]:
+        request_payload = {
+            "url": _api_url(_clean(relay.get("base_url")), resource),
+            "apiKey": _clean(relay.get("api_key")),
+            "multipart": True,
+            "data": data,
+            "images": images,
+            "imageField": image_field,
+            "timeoutMs": HIGH_RES_RELAY_TIMEOUT_SECONDS * 1000,
+            "proxy": _outbound_proxy(),
+        }
+        result = self._request_with_node_fetch(request_payload)
+        if result.get("networkError"):
+            parts = [
+                _clean(result.get("networkError")) or "Node fetch network error",
+                _clean(result.get("errorName")),
+                _clean(result.get("causeCode")),
+                _clean(result.get("cause")),
+                f"proxy_used={bool(result.get('proxyUsed'))}",
+            ]
+            raise RuntimeError(" / ".join(part for part in parts if part))
+        if not bool(result.get("ok")):
+            status = int(result.get("status") or 0)
+            payload = result.get("json") if result.get("json") is not None else result.get("text")
+            raise RuntimeError(f"HTTP {status}: {_compact_error(payload) or _clean(payload)[:300]}")
+
+        session = self._session()
+        try:
+            content_type = _clean(result.get("contentType")).lower()
+            if "text/event-stream" in content_type:
+                return self._normalize_stream_text(session, _clean(result.get("text")), _clean(data.get("prompt")))
+            payload = result.get("json")
+            if payload is None:
+                text = _clean(result.get("text"))
+                try:
+                    payload = json.loads(text)
+                except Exception:
+                    payload = text
+            return self._normalize_response_items(session, payload, _clean(data.get("prompt")))
         finally:
             session.close()
 
@@ -853,39 +906,12 @@ class HighResImageRelayService:
         images: list[str],
         image_field: str = "image[]",
     ) -> tuple[int, list[dict[str, object]]]:
-        session = self._session()
-        files = []
-        try:
-            for index, encoded in enumerate(images, start=1):
-                try:
-                    image_data = base64.b64decode(encoded)
-                except Exception as exc:
-                    raise RuntimeError("参考图数据无效") from exc
-                files.append((image_field, (f"image_{index}.png", image_data, "image/png")))
-            response = session.post(
-                _api_url(_clean(relay.get("base_url")), resource),
-                headers=self._headers(relay),
-                data=data,
-                files=files,
-                timeout=HIGH_RES_RELAY_TIMEOUT,
-                stream=_clean(data.get("stream")).lower() == "true",
-                http_version=CurlHttpVersion.V2TLS,
-            )
-            if not (200 <= response.status_code < 300):
-                try:
-                    payload: object = response.json()
-                except Exception:
-                    payload = response.text
-                raise RuntimeError(f"HTTP {response.status_code}: {_compact_error(payload) or response.text[:300]}")
-            if _clean(data.get("stream")).lower() == "true" and "text/event-stream" in response.headers.get("Content-Type", "").lower():
-                return self._normalize_stream_response(session, response, _clean(data.get("prompt")))
+        for encoded in images:
             try:
-                payload = response.json()
-            except Exception:
-                payload = response.text
-            return self._normalize_response_items(session, payload, _clean(data.get("prompt")))
-        finally:
-            session.close()
+                base64.b64decode(encoded)
+            except Exception as exc:
+                raise RuntimeError("参考图数据无效") from exc
+        return self._post_multipart_with_node_fetch(relay, resource, data, images, image_field)
 
     def generate(
         self,

@@ -44,3 +44,22 @@
 - `docs/ops-health-and-queues.md`：补充注册检测参考警告的解释。
 - `progress.md`：追加本轮修改记录。
 - 回滚方式：使用 Git 回退本轮涉及文件，或执行 `git restore services/register_health_service.py web/src/lib/api.ts web/src/app/dashboard/page.tsx docs/ops-health-and-queues.md progress.md`；如果已提交则用对应提交点执行 `git revert <commit>`。
+
+## 2026-06-16 - Task: 修复 2K/4K 参考图中转 multipart 上传
+### What was done
+- 修复 2K/4K 带参考图调用 Duck / 中转接口时报 `files is not supported, use multipart` 的问题。
+- 中转接口 `/images/edits` 上传改为由 Node helper 发送 multipart，不再使用 `curl_cffi files=`。
+- multipart 上传继续读取全局代理配置，方便服务器走 `mihomo`。
+- 本地 Docker 镜像已重新构建并重建容器，当前仍通过 `http://localhost:8080` 访问。
+### Testing
+- `node --check scripts/high_res_image_relay_fetch.mjs`
+- `python -m py_compile services/high_res_image_relay_service.py`
+- 使用 `https://postman-echo.com/post` 回显接口验证 Node helper 能发送 multipart 表单和图片文件字段。
+- `docker build -t chatgpt2api-auth-local:dev .`
+- `docker run -d --name chatgpt2api-auth-local -p 8080:80 -e STORAGE_BACKEND=json -v "${PWD}\data:/app/data" -v "${PWD}\config.json:/app/config.json" chatgpt2api-auth-local:dev`
+### Notes
+- `scripts/high_res_image_relay_fetch.mjs`：新增 multipart body 构造，并让 multipart 请求也走 Node helper 的代理发送逻辑。
+- `services/high_res_image_relay_service.py`：新增 Node helper multipart 调用，移除 `/images/edits` 路径中的 `curl_cffi files=`。
+- `docs/ops-health-and-queues.md`：补充 2K/4K 参考图上传说明。
+- `progress.md`：追加本轮修改记录。
+- 回滚方式：使用 Git 回退本轮涉及文件，或执行 `git restore scripts/high_res_image_relay_fetch.mjs services/high_res_image_relay_service.py docs/ops-health-and-queues.md progress.md`；如果已提交则用对应提交点执行 `git revert <commit>`。
