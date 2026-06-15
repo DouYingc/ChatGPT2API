@@ -5,13 +5,30 @@ from threading import Event
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from api import accounts, ai, chat, gallery, high_res_relays, image_tasks, quota_ledger, redeem, register, system, video
 from api.support import resolve_web_asset, start_limited_account_watcher
 from services.backup_service import backup_service
 from services.config import config
+
+BLOCKED_PROBE_PREFIXES = (
+    "/.aws",
+    "/.env",
+    "/.git",
+    "/.svn",
+    "/adminer",
+    "/boaform",
+    "/cgi-bin",
+    "/phpinfo",
+    "/phpmyadmin",
+    "/pma",
+    "/vendor/phpunit",
+    "/wp-",
+    "/wordpress",
+    "/xmlrpc.php",
+)
 
 
 def create_app() -> FastAPI:
@@ -38,6 +55,13 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def _block_common_probe_paths(request: Request, call_next):
+        path = request.url.path.lower()
+        if any(path == prefix or path.startswith(f"{prefix}/") for prefix in BLOCKED_PROBE_PREFIXES):
+            return Response(status_code=404)
+        return await call_next(request)
 
     # 动态接口禁缓存：/api/* 与 /v1/* 都是后端业务数据，浏览器若自行启发式缓存
     # 会出现"改了配置/数据但 UI 不更新"的诡异现象。一律 no-store 让每次都打到后端。

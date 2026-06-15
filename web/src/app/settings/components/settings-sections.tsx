@@ -226,6 +226,7 @@ export function ImageSection() {
   const setCleanupProtectUserImages = useSettingsStore((s) => s.setCleanupProtectUserImages);
   const setImagePollTimeoutSecs = useSettingsStore((s) => s.setImagePollTimeoutSecs);
   const setImageAccountConcurrency = useSettingsStore((s) => s.setImageAccountConcurrency);
+  const setHighResImageConcurrency = useSettingsStore((s) => s.setHighResImageConcurrency);
 
   return (
     <div className="space-y-6">
@@ -240,7 +241,7 @@ export function ImageSection() {
         <p className={HELP_CLASS}>用作生成结果 URL 的前缀。留空则按请求 host 自动推断。</p>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2">
+      <div className="grid gap-4 md:grid-cols-3">
         <div className="space-y-2">
           <label className={LABEL_CLASS}>图片轮询超时（秒）</label>
           <Input
@@ -260,6 +261,16 @@ export function ImageSection() {
             className={INPUT_CLASS}
           />
           <p className={HELP_CLASS}>限制每个账号同时处理的图片请求数量。</p>
+        </div>
+        <div className="space-y-2">
+          <label className={LABEL_CLASS}>2K/4K 总并发</label>
+          <Input
+            value={String(config?.high_res_image_concurrency || "")}
+            onChange={(e) => setHighResImageConcurrency(e.target.value)}
+            placeholder="3"
+            className={INPUT_CLASS}
+          />
+          <p className={HELP_CLASS}>限制同时真正运行的高清任务数量，超出的任务先排队。</p>
         </div>
       </div>
 

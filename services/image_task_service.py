@@ -61,6 +61,11 @@ def _quota_cost(value: object) -> int:
         return 1
 
 
+def _is_high_resolution(value: object) -> bool:
+    normalized = _clean(value).lower().replace(" ", "").replace("-", "")
+    return normalized in {"2k", "4k"}
+
+
 def _owner_id(identity: dict[str, object]) -> str:
     return _clean(identity.get("id")) or "anonymous"
 
@@ -105,6 +110,36 @@ def _public_task(task: dict[str, Any], *, sanitize_errors: bool = False) -> dict
     return item
 
 
+class ConfigurableLimiter:
+    def __init__(self, limit_getter: Callable[[], int]):
+        self.limit_getter = limit_getter
+        self._condition = threading.Condition()
+        self._active = 0
+
+    def acquire(self) -> None:
+        with self._condition:
+            while self._active >= self.limit:
+                self._condition.wait(timeout=1)
+            self._active += 1
+
+    def release(self) -> None:
+        with self._condition:
+            self._active = max(0, self._active - 1)
+            self._condition.notify_all()
+
+    @property
+    def limit(self) -> int:
+        try:
+            return max(1, int(self.limit_getter()))
+        except Exception:
+            return 3
+
+    @property
+    def active(self) -> int:
+        with self._condition:
+            return self._active
+
+
 class ImageTaskService:
     def __init__(
         self,
@@ -118,6 +153,7 @@ class ImageTaskService:
         self.generation_handler = generation_handler
         self.edit_handler = edit_handler
         self.retention_days_getter = retention_days_getter or (lambda: config.image_retention_days)
+        self._high_res_limiter = ConfigurableLimiter(lambda: config.high_res_image_concurrency)
         self._lock = threading.RLock()
         self._tasks: dict[str, dict[str, Any]] = {}
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -323,15 +359,25 @@ class ImageTaskService:
         identity: dict[str, object],
         model: str,
     ) -> None:
-        # 启动前检查：若任务已被取消，直接结束
-        with self._lock:
-            task = self._tasks.get(key)
-            if task is None or task.get("status") == TASK_STATUS_CANCELED:
-                return
-
-        started = time.time()
-        self._update_task(key, status=TASK_STATUS_RUNNING, error="")
+        acquired_high_res_slot = False
         try:
+            # 启动前检查：若任务已被取消，直接结束。2K/4K 在拿到总并发槽位前保持 queued，
+            # 避免用户同时提交多张高清图时一起撞上游。
+            with self._lock:
+                task = self._tasks.get(key)
+                if task is None or task.get("status") == TASK_STATUS_CANCELED:
+                    return
+
+            if _is_high_resolution(payload.get("resolution")):
+                self._high_res_limiter.acquire()
+                acquired_high_res_slot = True
+                with self._lock:
+                    task = self._tasks.get(key)
+                    if task is None or task.get("status") == TASK_STATUS_CANCELED:
+                        return
+
+            started = time.time()
+            self._update_task(key, status=TASK_STATUS_RUNNING, error="")
             handler = self.edit_handler if mode == "edit" else self.generation_handler
             result = handler(payload)
             # 请求结束后再检查：若期间被取消，丢弃结果不写回
@@ -391,6 +437,35 @@ class ImageTaskService:
                 status="failed",
                 error=error_message,
             )
+        finally:
+            if acquired_high_res_slot:
+                self._high_res_limiter.release()
+
+    def summary(self) -> dict[str, object]:
+        with self._lock:
+            if self._cleanup_locked():
+                self._save_locked()
+            counts = {status: 0 for status in VALID_STATUSES}
+            high_res_counts = {"queued": 0, "running": 0}
+            for task in self._tasks.values():
+                status = _clean(task.get("status"))
+                if status in counts:
+                    counts[status] += 1
+                if _is_high_resolution(task.get("resolution")) and status in high_res_counts:
+                    high_res_counts[status] += 1
+            return {
+                "total": len(self._tasks),
+                "queued": counts[TASK_STATUS_QUEUED],
+                "running": counts[TASK_STATUS_RUNNING],
+                "success": counts[TASK_STATUS_SUCCESS],
+                "error": counts[TASK_STATUS_ERROR],
+                "canceled": counts[TASK_STATUS_CANCELED],
+                "high_res": {
+                    **high_res_counts,
+                    "active": self._high_res_limiter.active,
+                    "limit": self._high_res_limiter.limit,
+                },
+            }
 
     def _log_call(
         self,

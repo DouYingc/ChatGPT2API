@@ -4,10 +4,12 @@ import asyncio
 import json
 
 from fastapi import APIRouter, Header
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from api.support import require_admin
+from services.register_health_service import run_register_health_check
 from services.register_service import register_service
 
 
@@ -55,6 +57,11 @@ def create_router() -> APIRouter:
     async def repair_abnormal_accounts(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"register": register_service.repair_abnormal_accounts()}
+
+    @router.post("/api/register/health")
+    async def register_health(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return await run_in_threadpool(run_register_health_check)
 
     @router.get("/api/register/events")
     async def register_events(token: str = ""):

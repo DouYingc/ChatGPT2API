@@ -293,6 +293,13 @@ class ConfigStore:
             return 3
 
     @property
+    def high_res_image_concurrency(self) -> int:
+        try:
+            return max(1, int(self.data.get("high_res_image_concurrency", 3)))
+        except (TypeError, ValueError):
+            return 3
+
+    @property
     def register_ip_daily_limit(self) -> int:
         try:
             return max(0, int(self.data.get("register_ip_daily_limit", 3)))
@@ -469,6 +476,7 @@ class ConfigStore:
         data["cleanup_protect_user_images"] = self.cleanup_protect_user_images
         data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
         data["image_account_concurrency"] = self.image_account_concurrency
+        data["high_res_image_concurrency"] = self.high_res_image_concurrency
         data["register_ip_daily_limit"] = self.register_ip_daily_limit
         data["image_ip_minute_limit"] = self.image_ip_minute_limit
         data["high_res_relay_fail_threshold"] = self.high_res_relay_fail_threshold

@@ -8,6 +8,11 @@ services:
     volumes:
       - ./data:/app/data
       - ./config.json:/app/config.json
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
       # 存储后端配置 (可选值: json, sqlite, postgres, git)
        - STORAGE_BACKEND=json

@@ -90,6 +90,7 @@ export type SettingsConfig = {
   cleanup_protect_user_images?: boolean;
   image_poll_timeout_secs?: number | string;
   image_account_concurrency?: number | string;
+  high_res_image_concurrency?: number | string;
   register_ip_daily_limit?: number | string;
   image_ip_minute_limit?: number | string;
   high_res_relay_fail_threshold?: number | string;
@@ -210,6 +211,22 @@ export type ImageOwner = {
   name: string;
   deleted: boolean;
   count: number;
+};
+
+export type ImageStorageSummary = {
+  images: { bytes: number; files: number };
+  thumbnails: { bytes: number; files: number };
+  total_bytes: number;
+  total_files: number;
+  retention_days: number;
+  protect_gallery: boolean;
+  protect_user_images: boolean;
+};
+
+export type ImageCleanupResult = {
+  removed_images: number;
+  removed_thumbnails: number;
+  storage: ImageStorageSummary;
 };
 
 export type SystemLog = {
@@ -412,6 +429,42 @@ export type AdminOverview = {
     consumed: number;
     refunded: number;
   };
+  relay: {
+    today_success: number;
+    today_fail: number;
+    today_success_rate: number;
+    today_avg_duration_ms: number;
+    enabled: number;
+    paused: number;
+    items: HighResRelay[];
+    recent_errors: Array<{
+      id?: string;
+      name?: string;
+      error?: string;
+      last_used_at?: string | null;
+    }>;
+  };
+  account_pool: {
+    total: number;
+    available: number;
+    limited: number;
+    abnormal: number;
+    disabled: number;
+  };
+  image_tasks: {
+    total: number;
+    queued: number;
+    running: number;
+    success: number;
+    error: number;
+    canceled: number;
+    high_res: {
+      queued: number;
+      running: number;
+      active: number;
+      limit: number;
+    };
+  };
   recent_failures: Array<{
     id?: string;
     time?: string;
@@ -423,6 +476,24 @@ export type AdminOverview = {
     image_route?: string;
     quota_cost?: number;
     error?: string;
+  }>;
+};
+
+export type RegisterHealthResult = {
+  ok: boolean;
+  checked_at: string;
+  proxy: {
+    proxy: string;
+    node: string;
+    detail: string;
+  };
+  checks: Array<{
+    name: string;
+    ok: boolean;
+    status?: number;
+    latency_ms: number;
+    error?: string;
+    detail?: string;
   }>;
 };
 
@@ -735,6 +806,14 @@ export async function fetchImageOwners() {
   return httpRequest<{ items: ImageOwner[] }>("/api/images/owners");
 }
 
+export async function fetchImageStorage() {
+  return httpRequest<ImageStorageSummary>("/api/images/storage");
+}
+
+export async function cleanupExpiredImages() {
+  return httpRequest<ImageCleanupResult>("/api/images/cleanup", { method: "POST" });
+}
+
 export async function deleteManagedImages(body: { paths?: string[]; start_date?: string; end_date?: string; owner?: string; all_matching?: boolean }) {
   return httpRequest<{ removed: number }>("/api/images/delete", { method: "POST", body });
 }
@@ -792,6 +871,10 @@ export async function fetchSystemLogs(filters: { type?: string; start_date?: str
 
 export async function fetchAdminOverview() {
   return httpRequest<AdminOverview>("/api/admin/overview");
+}
+
+export async function runRegisterHealthCheck() {
+  return httpRequest<RegisterHealthResult>("/api/register/health", { method: "POST" });
 }
 
 export async function deleteSystemLogs(ids: string[]) {

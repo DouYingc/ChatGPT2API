@@ -111,6 +111,46 @@ def cleanup_image_thumbnails() -> int:
     return removed
 
 
+def _directory_usage(root: Path) -> dict[str, int]:
+    if not root.exists():
+        return {"bytes": 0, "files": 0}
+    total_bytes = 0
+    files = 0
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            total_bytes += path.stat().st_size
+            files += 1
+        except OSError:
+            continue
+    return {"bytes": total_bytes, "files": files}
+
+
+def image_storage_summary() -> dict[str, object]:
+    images = _directory_usage(config.images_dir)
+    thumbnails = _directory_usage(config.image_thumbnails_dir)
+    return {
+        "images": images,
+        "thumbnails": thumbnails,
+        "total_bytes": int(images["bytes"]) + int(thumbnails["bytes"]),
+        "total_files": int(images["files"]) + int(thumbnails["files"]),
+        "retention_days": config.image_retention_days,
+        "protect_gallery": config.cleanup_protect_gallery,
+        "protect_user_images": config.cleanup_protect_user_images,
+    }
+
+
+def cleanup_expired_images() -> dict[str, object]:
+    removed_images = config.cleanup_old_images()
+    removed_thumbnails = cleanup_image_thumbnails()
+    return {
+        "removed_images": removed_images,
+        "removed_thumbnails": removed_thumbnails,
+        "storage": image_storage_summary(),
+    }
+
+
 def count_total_images() -> int:
     """图片管理页"未归属"数量统计用：纯粹数 images_dir 下文件数。
     比 _image_items 轻量，避开了打开文件取尺寸的 IO。"""

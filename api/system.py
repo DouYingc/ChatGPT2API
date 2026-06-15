@@ -10,11 +10,14 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from api.support import can_use_high_resolution, can_use_paid_image_accounts, client_ip_from_request, require_admin, require_identity, resolve_image_base_url
+from services.account_service import account_service
 from services.auth_service import AuthAccountDisabledError, auth_service
 from services.backup_service import BackupError, backup_service
 from services.config import config
+from services.high_res_image_relay_service import high_res_image_relay_service
 from services.image_owners_service import get_owner, owner_counts
-from services.image_service import count_total_images, delete_images, download_images_zip, get_image_download_response, get_thumbnail_response, list_images
+from services.image_service import cleanup_expired_images, count_total_images, delete_images, download_images_zip, get_image_download_response, get_thumbnail_response, image_storage_summary, list_images
+from services.image_task_service import image_task_service
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
 from services.log_service import log_service
 from services.proxy_service import test_proxy
@@ -121,6 +124,49 @@ def _overview_log_item(item: dict[str, Any]) -> dict[str, object]:
         "image_route": detail.get("image_route") or detail.get("route") or "",
         "quota_cost": _safe_int(detail.get("quota_cost")),
         "error": detail.get("error") or "",
+    }
+
+
+def _account_pool_summary() -> dict[str, int]:
+    items = account_service.list_accounts()
+    return {
+        "total": len(items),
+        "available": sum(1 for item in items if item.get("status") == "正常"),
+        "limited": sum(1 for item in items if item.get("status") == "限流"),
+        "abnormal": sum(1 for item in items if item.get("status") == "异常"),
+        "disabled": sum(1 for item in items if item.get("status") == "禁用"),
+    }
+
+
+def _relay_overview() -> dict[str, object]:
+    relays = high_res_image_relay_service.list_relays()
+    today_success = sum(_safe_int(item.get("today_success")) for item in relays)
+    today_fail = sum(_safe_int(item.get("today_fail")) for item in relays)
+    today_total = today_success + today_fail
+    weighted_duration = sum(
+        _safe_int(item.get("today_avg_duration_ms"))
+        * (_safe_int(item.get("today_success")) + _safe_int(item.get("today_fail")))
+        for item in relays
+    )
+    recent_errors = [
+        {
+            "id": item.get("id"),
+            "name": item.get("name") or item.get("base_url"),
+            "error": item.get("last_error") or "",
+            "last_used_at": item.get("last_used_at"),
+        }
+        for item in relays
+        if item.get("last_error")
+    ][:5]
+    return {
+        "today_success": today_success,
+        "today_fail": today_fail,
+        "today_success_rate": round(today_success * 100 / today_total, 1) if today_total else 100.0,
+        "today_avg_duration_ms": round(weighted_duration / today_total) if today_total else 0,
+        "enabled": sum(1 for item in relays if item.get("enabled")),
+        "paused": sum(1 for item in relays if item.get("temporarily_paused")),
+        "items": relays,
+        "recent_errors": recent_errors,
     }
 
 
@@ -254,6 +300,9 @@ def create_router(app_version: str) -> APIRouter:
                 "consumed": consumed_quota,
                 "refunded": refunded_quota,
             },
+            "relay": _relay_overview(),
+            "account_pool": _account_pool_summary(),
+            "image_tasks": image_task_service.summary(),
             "recent_failures": [_overview_log_item(item) for item in failed_logs[:8]],
         }
 
@@ -357,6 +406,16 @@ def create_router(app_version: str) -> APIRouter:
         items.append({"id": "__admin__", "name": "管理员", "deleted": False, "count": admin_count})
         items.append({"id": "__unowned__", "name": "未归属", "deleted": False, "count": unowned_count})
         return {"items": items}
+
+    @router.get("/api/images/storage")
+    async def get_image_storage(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return await run_in_threadpool(image_storage_summary)
+
+    @router.post("/api/images/cleanup")
+    async def cleanup_images_endpoint(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return await run_in_threadpool(cleanup_expired_images)
 
     @router.get("/image-thumbnails/{image_path:path}", include_in_schema=False)
     async def get_image_thumbnail(image_path: str):

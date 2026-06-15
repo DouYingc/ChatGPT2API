@@ -10,6 +10,11 @@ services:
     volumes:
       - ./data:/app/data
       - ./config.json:/app/config.json
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
       STORAGE_BACKEND: sqlite
       DATABASE_URL: sqlite:////app/data/accounts.db

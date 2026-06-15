@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, ImageIcon, LoaderCircle, Maximize2, Plus, RefreshCw, Search, Share2, Tag, Trash2, User, X } from "lucide-react";
+import { CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, Download, HardDrive, ImageIcon, LoaderCircle, Maximize2, Plus, RefreshCw, Search, Share2, Tag, Trash2, User, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { DateRangeFilter } from "@/components/date-range-filter";
@@ -13,7 +13,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { deleteImageTag, deleteManagedImages, downloadImages, downloadSingleImage, fetchImageOwners, fetchImageTags, fetchManagedImages, getMyPublishedBatch, publishGalleryItem, setImageTags, type ImageOwner, type ManagedImage } from "@/lib/api";
+import { cleanupExpiredImages, deleteImageTag, deleteManagedImages, downloadImages, downloadSingleImage, fetchImageOwners, fetchImageStorage, fetchImageTags, fetchManagedImages, getMyPublishedBatch, publishGalleryItem, setImageTags, type ImageOwner, type ImageStorageSummary, type ManagedImage } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 const LONG_PRESS_MS = 800;
@@ -276,6 +276,8 @@ function ImageManagerContent() {
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [deleteMode, setDeleteMode] = useState<"selected" | "filtered" | null>(null);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [storage, setStorage] = useState<ImageStorageSummary | null>(null);
+  const [isCleaningStorage, setIsCleaningStorage] = useState(false);
 
   // 发布画廊状态：rel → "publishing" | "published"。
   // admin 视角下未必由当前账号发的，被任何用户发过都标"已发布"，
@@ -377,14 +379,16 @@ function ImageManagerContent() {
   const loadImages = async (silent = false) => {
     if (!silent) setIsLoading(true);
     try {
-      const [data, tagsData, ownersData] = await Promise.all([
+      const [data, tagsData, ownersData, storageData] = await Promise.all([
         fetchManagedImages({ start_date: startDate, end_date: endDate, owner }),
         fetchImageTags(),
         fetchImageOwners(),
+        fetchImageStorage(),
       ]);
       setItems(data.items);
       setAllTags(tagsData.tags);
       setOwners(ownersData.items);
+      setStorage(storageData);
       setSelectedPaths((current) => current.filter((path) => data.items.some((item) => imageKey(item) === path)));
       setPage(1);
       // 播种发布状态：admin 视角下后端会跨用户返回所有已发布的 rel。
@@ -627,6 +631,20 @@ function ImageManagerContent() {
     await downloadSingleImage(item.rel);
   };
 
+  const handleCleanupExpiredImages = async () => {
+    setIsCleaningStorage(true);
+    try {
+      const result = await cleanupExpiredImages();
+      setStorage(result.storage);
+      toast.success(`已清理 ${result.removed_images} 张过期图片，${result.removed_thumbnails} 个失效缩略图`);
+      await loadImages(true);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "清理过期图片失败");
+    } finally {
+      setIsCleaningStorage(false);
+    }
+  };
+
   // 首次挂载且缓存命中（filter 与缓存一致）→ 静默刷新；
   // 之后改 filter 触发的 effect 都正常 spinner。
   const isFirstRunRef = useRef(true);
@@ -673,6 +691,48 @@ function ImageManagerContent() {
           </Button>
         </div>
       </div>
+
+      <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
+        <CardContent className="flex flex-col gap-4 p-5 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex min-w-0 items-start gap-3">
+            <span className="inline-flex size-10 shrink-0 items-center justify-center rounded-xl bg-stone-100 text-stone-600">
+              <HardDrive className="size-5" />
+            </span>
+            <div className="min-w-0 space-y-1">
+              <div className="text-sm font-semibold text-stone-900">本地图片存储</div>
+              <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-stone-500">
+                <span>总占用 {storage ? formatSize(storage.total_bytes) : "-"}</span>
+                <span>原图 {storage ? `${formatSize(storage.images.bytes)} / ${storage.images.files} 张` : "-"}</span>
+                <span>缩略图 {storage ? `${formatSize(storage.thumbnails.bytes)} / ${storage.thumbnails.files} 个` : "-"}</span>
+              </div>
+              <div className="text-xs leading-5 text-stone-400">
+                保留 {storage?.retention_days ?? "-"} 天
+                {storage?.protect_gallery ? " · 保护画廊" : " · 不保护画廊"}
+                {storage?.protect_user_images ? " · 保护用户作品" : " · 不保护用户作品"}
+              </div>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="outline"
+              className="h-9 rounded-xl border-stone-200 bg-white px-4 text-stone-700 hover:bg-stone-50"
+              onClick={() => void loadImages()}
+              disabled={isLoading || isCleaningStorage}
+            >
+              <RefreshCw className={`size-4 ${isLoading ? "animate-spin" : ""}`} />
+              刷新统计
+            </Button>
+            <Button
+              className="h-9 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800"
+              onClick={() => void handleCleanupExpiredImages()}
+              disabled={isCleaningStorage}
+            >
+              {isCleaningStorage ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+              清理过期图片
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
 
       {allTags.length > 0 ? (
         <div className="flex flex-wrap items-center gap-2">

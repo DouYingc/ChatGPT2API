@@ -116,6 +116,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     cleanup_protect_user_images: Boolean(config.cleanup_protect_user_images ?? true),
     image_poll_timeout_secs: Number(config.image_poll_timeout_secs || 120),
     image_account_concurrency: Number(config.image_account_concurrency || 3),
+    high_res_image_concurrency: Number(config.high_res_image_concurrency || 3),
     register_ip_daily_limit: Number(config.register_ip_daily_limit ?? 3),
     image_ip_minute_limit: Number(config.image_ip_minute_limit ?? 10),
     high_res_relay_fail_threshold: Number(config.high_res_relay_fail_threshold ?? 3),
@@ -264,6 +265,7 @@ type SettingsStore = {
   setCleanupProtectUserImages: (value: boolean) => void;
   setImagePollTimeoutSecs: (value: string) => void;
   setImageAccountConcurrency: (value: string) => void;
+  setHighResImageConcurrency: (value: string) => void;
   setRegisterIpDailyLimit: (value: string) => void;
   setImageIpMinuteLimit: (value: string) => void;
   setHighResRelayFailThreshold: (value: string) => void;
@@ -436,6 +438,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         cleanup_protect_user_images: Boolean(config.cleanup_protect_user_images ?? true),
         image_poll_timeout_secs: Math.max(1, Number(config.image_poll_timeout_secs) || 120),
         image_account_concurrency: Math.max(1, Number(config.image_account_concurrency) || 3),
+        high_res_image_concurrency: Math.max(1, Number(config.high_res_image_concurrency) || 3),
         register_ip_daily_limit: Math.max(0, Number(config.register_ip_daily_limit) || 0),
         image_ip_minute_limit: Math.max(0, Number(config.image_ip_minute_limit) || 0),
         high_res_relay_fail_threshold: Math.max(1, Number(config.high_res_relay_fail_threshold) || 3),
@@ -522,6 +525,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImageAccountConcurrency: (value) => {
     set((state) => state.config ? { config: { ...state.config, image_account_concurrency: value }, isDirty: true } : {});
+  },
+
+  setHighResImageConcurrency: (value) => {
+    set((state) => state.config ? { config: { ...state.config, high_res_image_concurrency: value }, isDirty: true } : {});
   },
 
   setRegisterIpDailyLimit: (value) => {

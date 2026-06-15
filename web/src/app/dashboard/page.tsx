@@ -4,10 +4,14 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
   Activity,
+  AlertCircle,
+  CheckCircle2,
   Image as ImageIcon,
   LoaderCircle,
+  Mail,
   Percent,
   RefreshCw,
+  Server,
   Ticket,
   UserPlus,
   WalletCards,
@@ -18,7 +22,7 @@ import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { fetchAdminOverview, type AdminOverview } from "@/lib/api";
+import { fetchAdminOverview, runRegisterHealthCheck, type AdminOverview, type RegisterHealthResult } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 type MetricCardProps = {
@@ -69,6 +73,10 @@ function resolutionLabel(value: unknown) {
   return text ? text.toUpperCase() : "未知";
 }
 
+function okLabel(value: boolean) {
+  return value ? "正常" : "异常";
+}
+
 function MetricCard({ label, value, hint, icon: Icon, tone = "stone", href }: MetricCardProps) {
   const content = (
     <div className={`rounded-2xl border p-4 shadow-sm ${toneClassName[tone]}`}>
@@ -101,7 +109,9 @@ function buildHref(path: string, params: Record<string, string>) {
 
 function DashboardContent() {
   const [overview, setOverview] = useState<AdminOverview | null>(null);
+  const [registerHealth, setRegisterHealth] = useState<RegisterHealthResult | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isCheckingRegister, setIsCheckingRegister] = useState(false);
 
   const loadOverview = async (silent = false) => {
     if (!silent) setIsLoading(true);
@@ -118,6 +128,23 @@ function DashboardContent() {
   useEffect(() => {
     void loadOverview();
   }, []);
+
+  const runRegisterCheck = async () => {
+    setIsCheckingRegister(true);
+    try {
+      const data = await runRegisterHealthCheck();
+      setRegisterHealth(data);
+      if (data.ok) {
+        toast.success("注册环境检测通过");
+      } else {
+        toast.error("注册环境存在异常");
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "注册环境检测失败");
+    } finally {
+      setIsCheckingRegister(false);
+    }
+  };
 
   return (
     <section className="mt-4 space-y-5 pb-12 sm:mt-6">
@@ -193,6 +220,114 @@ function DashboardContent() {
               icon={WalletCards}
               href={buildHref("/logs", { type: "call", kind: "image", date: overview.date })}
             />
+          </div>
+
+          <div className="grid gap-4 xl:grid-cols-2">
+            <div className="overflow-hidden rounded-2xl border border-stone-200 bg-white shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-100 px-5 py-4">
+                <div>
+                  <h2 className="text-sm font-semibold text-stone-950">注册环境检测</h2>
+                  <p className="mt-1 text-xs text-stone-500">检测邮箱、ChatGPT CSRF、auth.openai.com 与当前代理节点。</p>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-9 rounded-xl border-stone-200 bg-white px-4 text-stone-700 hover:bg-stone-50"
+                  onClick={() => void runRegisterCheck()}
+                  disabled={isCheckingRegister}
+                >
+                  {isCheckingRegister ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+                  运行检测
+                </Button>
+              </div>
+              <div className="space-y-3 p-5">
+                <div className="flex flex-wrap items-center gap-2 text-sm text-stone-600">
+                  <Server className="size-4 text-stone-400" />
+                  <span>代理：{registerHealth?.proxy.proxy || "未检测"}</span>
+                  {registerHealth?.proxy.node ? (
+                    <Badge variant="secondary" className="rounded-md bg-sky-50 text-sky-700">
+                      {registerHealth.proxy.node}
+                    </Badge>
+                  ) : null}
+                </div>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {(registerHealth?.checks ?? []).map((item) => (
+                    <div key={item.name} className="rounded-xl border border-stone-100 bg-stone-50/70 p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex min-w-0 items-center gap-2 text-sm font-medium text-stone-800">
+                          {item.ok ? <CheckCircle2 className="size-4 text-emerald-600" /> : <AlertCircle className="size-4 text-rose-600" />}
+                          <span className="truncate">{item.name}</span>
+                        </div>
+                        <Badge variant={item.ok ? "success" : "danger"} className="rounded-md">
+                          {okLabel(item.ok)}
+                        </Badge>
+                      </div>
+                      <div className="mt-2 truncate text-xs text-stone-500">
+                        HTTP {item.status ?? 0} · {formatDuration(item.latency_ms)}
+                        {item.error ? ` · ${item.error}` : item.detail ? ` · ${item.detail}` : ""}
+                      </div>
+                    </div>
+                  ))}
+                  {!registerHealth ? (
+                    <div className="col-span-full rounded-xl border border-dashed border-stone-200 px-4 py-8 text-center text-sm text-stone-500">
+                      点击运行检测后显示结果
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+
+            <div className="overflow-hidden rounded-2xl border border-stone-200 bg-white shadow-sm">
+              <div className="border-b border-stone-100 px-5 py-4">
+                <h2 className="text-sm font-semibold text-stone-950">中转接口与号池健康</h2>
+                <p className="mt-1 text-xs text-stone-500">聚合 Duck / 中转接口、号池账号和图片任务队列状态。</p>
+              </div>
+              <div className="grid gap-3 p-5 sm:grid-cols-2">
+                <MetricCard
+                  label="Duck 今日成功率"
+                  value={overview.relay.today_success + overview.relay.today_fail > 0 ? formatRate(overview.relay.today_success_rate) : "-"}
+                  hint={`成功 ${formatNumber(overview.relay.today_success)} · 失败 ${formatNumber(overview.relay.today_fail)} · 平均 ${formatDuration(overview.relay.today_avg_duration_ms)}`}
+                  icon={Percent}
+                  tone={overview.relay.today_fail > 0 ? "amber" : "emerald"}
+                />
+                <MetricCard
+                  label="号池可用账号"
+                  value={formatNumber(overview.account_pool.available)}
+                  hint={`限流 ${formatNumber(overview.account_pool.limited)} · 异常 ${formatNumber(overview.account_pool.abnormal)} · 总 ${formatNumber(overview.account_pool.total)}`}
+                  icon={Mail}
+                  tone={overview.account_pool.available > 0 ? "emerald" : "rose"}
+                />
+                <MetricCard
+                  label="图片队列"
+                  value={formatNumber(overview.image_tasks.queued + overview.image_tasks.running)}
+                  hint={`排队 ${formatNumber(overview.image_tasks.queued)} · 运行 ${formatNumber(overview.image_tasks.running)}`}
+                  icon={Activity}
+                  tone={overview.image_tasks.running > 0 ? "sky" : "stone"}
+                />
+                <MetricCard
+                  label="2K/4K 并发"
+                  value={`${overview.image_tasks.high_res.active}/${overview.image_tasks.high_res.limit}`}
+                  hint={`高清排队 ${formatNumber(overview.image_tasks.high_res.queued)} · 运行 ${formatNumber(overview.image_tasks.high_res.running)}`}
+                  icon={ImageIcon}
+                  tone={overview.image_tasks.high_res.active >= overview.image_tasks.high_res.limit ? "amber" : "stone"}
+                />
+              </div>
+              <div className="border-t border-stone-100 px-5 py-4">
+                <div className="mb-2 text-xs font-medium text-stone-500">最近中转错误</div>
+                {overview.relay.recent_errors.length > 0 ? (
+                  <div className="space-y-2">
+                    {overview.relay.recent_errors.map((item) => (
+                      <div key={item.id || item.name} className="rounded-xl bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                        <span className="font-medium">{item.name || "中转接口"}：</span>
+                        <span>{item.error}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="rounded-xl bg-emerald-50 px-3 py-3 text-sm text-emerald-700">暂无中转错误</div>
+                )}
+              </div>
+            </div>
           </div>
 
           <div className="overflow-hidden rounded-2xl border border-stone-200 bg-white shadow-sm">
