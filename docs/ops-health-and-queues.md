@@ -20,8 +20,9 @@ http://localhost:8080
 
 - TempMail 直连是否可用。
 - TempMail 通过注册代理是否可用。
-- `https://chatgpt.com/api/auth/csrf` 是否可用。
-- `https://auth.openai.com` 是否可用。
+- OpenAI 注册入口 `auth.openai.com/api/accounts/authorize` 是否可用。
+- `https://chatgpt.com/api/auth/csrf` 是否可用，该项只作为参考。
+- `https://auth.openai.com` 首页是否可用，该项只作为参考。
 - 当前注册代理地址和可识别到的 mihomo 节点名。
 
 接口：
@@ -34,7 +35,8 @@ POST /api/register/health
 
 - 邮箱直连失败，通常优先看服务器 IP 是否被 TempMail 限制。
 - 邮箱代理成功但直连失败，说明注册邮箱链路应走代理。
-- ChatGPT CSRF 或 auth.openai.com 失败，优先切换代理节点。
+- OpenAI 注册入口失败，优先切换代理节点。
+- ChatGPT CSRF 或 auth.openai.com 首页显示 403 时，不一定影响注册；如果 OpenAI 注册入口正常，可以先按参考警告处理。
 - 代理节点为空，说明本地/服务器未配置注册代理，或无法访问 mihomo 控制接口。
 
 ## 中转接口与号池健康面板

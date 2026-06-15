@@ -73,8 +73,18 @@ function resolutionLabel(value: unknown) {
   return text ? text.toUpperCase() : "未知";
 }
 
-function okLabel(value: boolean) {
-  return value ? "正常" : "异常";
+function healthLevel(item: RegisterHealthResult["checks"][number]) {
+  const level = String(item.level || "").toLowerCase();
+  if (level === "warning") return "warning";
+  if (level === "error") return "error";
+  return item.ok ? "ok" : "error";
+}
+
+function healthLabel(item: RegisterHealthResult["checks"][number]) {
+  const level = healthLevel(item);
+  if (level === "warning") return "参考";
+  if (level === "error") return "异常";
+  return "正常";
 }
 
 function MetricCard({ label, value, hint, icon: Icon, tone = "stone", href }: MetricCardProps) {
@@ -135,9 +145,10 @@ function DashboardContent() {
       const data = await runRegisterHealthCheck();
       setRegisterHealth(data);
       if (data.ok) {
-        toast.success("注册环境检测通过");
+        const hasWarning = data.checks.some((item) => healthLevel(item) === "warning");
+        toast.success(hasWarning ? "核心注册链路可用，存在参考项警告" : "注册环境检测通过");
       } else {
-        toast.error("注册环境存在异常");
+        toast.error("核心注册链路存在异常");
       }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "注册环境检测失败");
@@ -227,7 +238,7 @@ function DashboardContent() {
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-100 px-5 py-4">
                 <div>
                   <h2 className="text-sm font-semibold text-stone-950">注册环境检测</h2>
-                  <p className="mt-1 text-xs text-stone-500">检测邮箱、ChatGPT CSRF、auth.openai.com 与当前代理节点。</p>
+                  <p className="mt-1 text-xs text-stone-500">检测邮箱、OpenAI 注册入口与参考访问项。</p>
                 </div>
                 <Button
                   type="button"
@@ -255,11 +266,20 @@ function DashboardContent() {
                     <div key={item.name} className="rounded-xl border border-stone-100 bg-stone-50/70 p-3">
                       <div className="flex items-center justify-between gap-3">
                         <div className="flex min-w-0 items-center gap-2 text-sm font-medium text-stone-800">
-                          {item.ok ? <CheckCircle2 className="size-4 text-emerald-600" /> : <AlertCircle className="size-4 text-rose-600" />}
+                          {healthLevel(item) === "ok" ? (
+                            <CheckCircle2 className="size-4 text-emerald-600" />
+                          ) : healthLevel(item) === "warning" ? (
+                            <AlertCircle className="size-4 text-amber-600" />
+                          ) : (
+                            <AlertCircle className="size-4 text-rose-600" />
+                          )}
                           <span className="truncate">{item.name}</span>
                         </div>
-                        <Badge variant={item.ok ? "success" : "danger"} className="rounded-md">
-                          {okLabel(item.ok)}
+                        <Badge
+                          variant={healthLevel(item) === "ok" ? "success" : healthLevel(item) === "warning" ? "warning" : "danger"}
+                          className="rounded-md"
+                        >
+                          {healthLabel(item)}
                         </Badge>
                       </div>
                       <div className="mt-2 truncate text-xs text-stone-500">

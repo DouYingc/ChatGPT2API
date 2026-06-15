@@ -24,3 +24,23 @@
 - `web/src/app/settings/components/settings-sections.tsx`：图片设置区域增加 2K/4K 总并发输入。
 - `docs/ops-health-and-queues.md`：新增本次功能的使用和排查说明。
 - 回滚方式：使用 Git 回退本次涉及文件，或在本地执行 `git restore services/register_health_service.py api/register.py api/system.py services/config.py services/image_task_service.py web/src/lib/api.ts web/src/app/dashboard/page.tsx web/src/app/settings/store.ts web/src/app/settings/components/settings-sections.tsx docs/ops-health-and-queues.md progress.md`；如果已提交则用对应提交点执行 `git revert <commit>`。
+
+## 2026-06-15 - Task: 修正注册环境检测口径
+### What was done
+- 注册环境检测新增更贴近真实注册流程的 OpenAI 注册入口检测。
+- ChatGPT CSRF 和 auth.openai.com 首页 403 改为参考警告，不再把整体环境误判为不可注册。
+- 前端注册环境检测卡片改为显示“正常 / 参考 / 异常”三种状态。
+- 本地 Docker 镜像已重新构建并重建容器，当前仍通过 `http://localhost:8080` 访问。
+### Testing
+- `python -m py_compile services/register_health_service.py`
+- `npm run build` in `web`
+- `docker build -t chatgpt2api-auth-local:dev .`
+- `docker run -d --name chatgpt2api-auth-local -p 8080:80 -e STORAGE_BACKEND=json -v "${PWD}\data:/app/data" -v "${PWD}\config.json:/app/config.json" chatgpt2api-auth-local:dev`
+- `Invoke-RestMethod -Uri http://localhost:8080/api/register/health -Method Post -Headers @{Authorization='Bearer chatgpt2api'}` 返回 `ok=true`，其中邮箱直连和 OpenAI 注册入口为正常，邮箱代理未配置、ChatGPT CSRF 403、auth.openai.com 首页 403 为参考警告。
+### Notes
+- `services/register_health_service.py`：调整注册健康检测判定逻辑并新增 OpenAI 注册入口探测。
+- `web/src/lib/api.ts`：注册健康检测结果类型增加 `level`。
+- `web/src/app/dashboard/page.tsx`：注册环境检测结果改为三态展示。
+- `docs/ops-health-and-queues.md`：补充注册检测参考警告的解释。
+- `progress.md`：追加本轮修改记录。
+- 回滚方式：使用 Git 回退本轮涉及文件，或执行 `git restore services/register_health_service.py web/src/lib/api.ts web/src/app/dashboard/page.tsx docs/ops-health-and-queues.md progress.md`；如果已提交则用对应提交点执行 `git revert <commit>`。

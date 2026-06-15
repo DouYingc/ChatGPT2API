@@ -490,6 +490,7 @@ export type RegisterHealthResult = {
   checks: Array<{
     name: string;
     ok: boolean;
+    level?: "ok" | "warning" | "error" | string;
     status?: number;
     latency_ms: number;
     error?: string;
