@@ -119,17 +119,20 @@ def _target_size(size: object, resolution: object) -> str:
     return table.get(normalized_resolution, {}).get(aspect) or table.get(normalized_resolution, {}).get("") or aspect
 
 
-def _image_body(*, prompt: str, model: str, size: str) -> dict[str, object]:
-    return {
+def _image_body(*, prompt: str, model: str, size: str, resolution: str = "") -> dict[str, object]:
+    body: dict[str, object] = {
         "model": model,
         "prompt": prompt,
         "size": size,
         "output_format": "png",
         "moderation": "auto",
         "n": 1,
-        "stream": True,
-        "partial_images": 1,
+        "stream": False,
     }
+    normalized_resolution = _clean(resolution).lower()
+    if normalized_resolution in {"1k", "2k", "4k"}:
+        body["resolution"] = normalized_resolution
+    return body
 
 
 def _chat_body(*, prompt: str, model: str, size: str) -> dict[str, object]:
@@ -934,7 +937,7 @@ class HighResImageRelayService:
             attempt_started = time.perf_counter()
             try:
                 if images:
-                    data = _image_body(prompt=prompt, model=body_model, size=target_size)
+                    data = _image_body(prompt=prompt, model=body_model, size=target_size, resolution=_clean(resolution))
                     created, items = self._post_multipart(
                         relay,
                         "/images/edits",
@@ -945,7 +948,7 @@ class HighResImageRelayService:
                     created, items = self._post_json(
                         relay,
                         "/images/generations",
-                        _image_body(prompt=prompt, model=body_model, size=target_size),
+                        _image_body(prompt=prompt, model=body_model, size=target_size, resolution=_clean(resolution)),
                     )
                 duration_ms = int((time.perf_counter() - attempt_started) * 1000)
                 self._mark_result(relay_id, ok=True, duration_ms=duration_ms)
@@ -955,6 +958,7 @@ class HighResImageRelayService:
                     "relay_id": relay_id,
                     "relay_name": relay_name,
                     "target_size": target_size,
+                    "target_resolution": _clean(resolution),
                 }
             except Exception as exc:
                 message = str(exc) or exc.__class__.__name__

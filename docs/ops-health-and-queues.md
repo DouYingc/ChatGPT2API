@@ -87,6 +87,39 @@ GET /api/admin/overview
 - 这条路径不再使用 `curl_cffi` 的 `files=` 参数，避免出现 `files is not supported, use multipart`。
 - multipart 请求由 Node helper 发送，和 2K/4K 文生图一样会读取全局代理配置。
 - 日志中的 `proxy_used=true/false` 可以用于判断请求是否实际走了代理。
+- 中转生图请求默认使用非流式返回，避免长时间流式连接在大图生成过程中被代理或接口断开。
+- 中转请求会同时发送像素尺寸 `size` 和清晰度 `resolution`，兼容只识别 `resolution=2k/4k` 的中转接口。
+
+## 图片自动清理
+
+配置项：
+
+```json
+{
+  "image_retention_days": 15,
+  "cleanup_protect_gallery": true,
+  "cleanup_protect_user_images": true
+}
+```
+
+行为：
+
+- 服务启动时会清理一次过期图片和失效缩略图。
+- 服务运行期间会每天自动清理一次，使用和图片管理页“清理过期图片”相同的规则。
+- `cleanup_protect_gallery=true` 时，已发布到画廊的图片不会被自动删除。
+- `cleanup_protect_user_images=true` 时，有用户归属的图片不会被自动删除；匿名或 admin 自己生成且无归属的图片仍按保留天数清理。
+
+## 失败提示归类
+
+普通用户看到的生图失败文案会做归类，避免暴露上游原始错误：
+
+- 额度不足：提示用户兑换额度。
+- 账号池限流或额度耗尽：提示稍后重试。
+- 中转接口连接失败：提示稍后重试或切换代理节点。
+- 代理连接异常：提示切换节点后重试。
+- 内容策略命中：提示调整提示词。
+
+管理员日志仍保留更详细的原始错误，方便排查中转、代理和号池问题。
 
 ## 本地常用验证命令
 

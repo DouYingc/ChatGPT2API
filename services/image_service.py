@@ -4,6 +4,7 @@ import io
 import zipfile
 from datetime import datetime
 from pathlib import Path
+from threading import Event, Thread
 
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
@@ -149,6 +150,22 @@ def cleanup_expired_images() -> dict[str, object]:
         "removed_thumbnails": removed_thumbnails,
         "storage": image_storage_summary(),
     }
+
+
+def start_image_cleanup_worker(stop_event: Event, *, interval_seconds: int = 86400) -> Thread:
+    """按保留天数定期清理本地图片，复用管理员手动清理的保护规则。"""
+
+    def _loop() -> None:
+        while not stop_event.wait(interval_seconds):
+            try:
+                cleanup_expired_images()
+            except Exception:
+                # 清理失败不能影响主服务；下一轮会继续尝试。
+                pass
+
+    thread = Thread(target=_loop, name="image-cleanup", daemon=True)
+    thread.start()
+    return thread
 
 
 def count_total_images() -> int:

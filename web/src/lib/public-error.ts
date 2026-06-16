@@ -35,7 +35,20 @@ export function publicErrorMessage(value: unknown) {
     text.includes("账号生图额度已用完") ||
     text.includes("限流")
   ) {
-    return "当前生成资源繁忙，请稍后重试";
+    return "账号池暂时限流或额度不足，请稍后重试";
+  }
+
+  if (
+    lower.includes("proxy error") ||
+    lower.includes("proxy connection") ||
+    lower.includes("tunnel connection") ||
+    lower.includes("socks") ||
+    lower.includes("curl: (77)") ||
+    lower.includes("certificate verify") ||
+    lower.includes("certificate verify locations") ||
+    lower.includes("ca cert")
+  ) {
+    return "代理连接异常，请切换节点后重试";
   }
 
   if (
@@ -64,6 +77,9 @@ export function publicErrorMessage(value: unknown) {
     lower.includes("upstream image connection failed") ||
     lower.includes("failed to perform")
   ) {
+    if (text.includes("中转") || lower.includes("duck:")) {
+      return "中转接口连接失败，请稍后重试或切换代理节点";
+    }
     return "接口繁忙，请稍后重试";
   }
 

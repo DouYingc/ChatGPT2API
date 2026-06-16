@@ -12,6 +12,7 @@ from api import accounts, ai, chat, gallery, high_res_relays, image_tasks, quota
 from api.support import resolve_web_asset, start_limited_account_watcher
 from services.backup_service import backup_service
 from services.config import config
+from services.image_service import cleanup_expired_images, start_image_cleanup_worker
 
 BLOCKED_PROBE_PREFIXES = (
     "/.aws",
@@ -38,13 +39,15 @@ def create_app() -> FastAPI:
     async def lifespan(_: FastAPI):
         stop_event = Event()
         thread = start_limited_account_watcher(stop_event)
+        image_cleanup_thread = start_image_cleanup_worker(stop_event)
         backup_service.start()
-        config.cleanup_old_images()
+        cleanup_expired_images()
         try:
             yield
         finally:
             stop_event.set()
             thread.join(timeout=1)
+            image_cleanup_thread.join(timeout=1)
             backup_service.stop()
 
     app = FastAPI(title="chatgpt2api", version=app_version, lifespan=lifespan)

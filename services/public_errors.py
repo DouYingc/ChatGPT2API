@@ -3,7 +3,9 @@ from __future__ import annotations
 from typing import Any
 
 INTERFACE_BUSY_MESSAGE = "接口繁忙，请稍后重试"
-RESOURCE_BUSY_MESSAGE = "当前生成资源繁忙，请稍后重试"
+RESOURCE_BUSY_MESSAGE = "账号池暂时限流或额度不足，请稍后重试"
+RELAY_BUSY_MESSAGE = "中转接口连接失败，请稍后重试或切换代理节点"
+PROXY_BUSY_MESSAGE = "代理连接异常，请切换节点后重试"
 CONTENT_POLICY_MESSAGE = "提示词可能不符合规则，请调整后重试"
 IMAGE_QUOTA_MESSAGE = "额度不足，请兑换后继续使用"
 
@@ -84,6 +86,21 @@ def public_error_message(message: object) -> str:
     if any(
         marker in lower
         for marker in (
+            "proxy error",
+            "proxy connection",
+            "tunnel connection",
+            "socks",
+            "curl: (77)",
+            "certificate verify",
+            "certificate verify locations",
+            "ca cert",
+        )
+    ):
+        return PROXY_BUSY_MESSAGE
+
+    if any(
+        marker in lower
+        for marker in (
             "高清中转接口调用失败",
             "中转接口调用失败",
             "duck:",
@@ -110,6 +127,8 @@ def public_error_message(message: object) -> str:
             "failed to perform",
         )
     ):
+        if "中转" in text or "duck:" in lower:
+            return RELAY_BUSY_MESSAGE
         return INTERFACE_BUSY_MESSAGE
 
     return text

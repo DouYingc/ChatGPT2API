@@ -63,3 +63,153 @@
 - `docs/ops-health-and-queues.md`：补充 2K/4K 参考图上传说明。
 - `progress.md`：追加本轮修改记录。
 - 回滚方式：使用 Git 回退本轮涉及文件，或执行 `git restore scripts/high_res_image_relay_fetch.mjs services/high_res_image_relay_service.py docs/ops-health-and-queues.md progress.md`；如果已提交则用对应提交点执行 `git revert <commit>`。
+
+## 2026-06-16 - Task: 中转生图改为非流式返回
+### What was done
+- 将 Duck / 中转接口生图请求从流式返回改为非流式返回。
+- 移除流式专用的 `partial_images` 参数，减少 2K/4K 长连接被代理或接口中途断开的概率。
+- 本地 Docker 镜像已重新构建并重建容器，当前仍通过 `http://localhost:8080` 访问。
+### Testing
+- `python -m py_compile services/high_res_image_relay_service.py`
+- `docker build -t chatgpt2api-auth-local:dev .`
+- `docker run -d --name chatgpt2api-auth-local -p 8080:80 -e STORAGE_BACKEND=json -v "${PWD}\data:/app/data" -v "${PWD}\config.json:/app/config.json" chatgpt2api-auth-local:dev`
+- `Invoke-RestMethod -Uri http://localhost:8080/auth/login -Method Post -Headers @{Authorization='Bearer chatgpt2api'}` 返回 `ok=true`。
+### Notes
+- `services/high_res_image_relay_service.py`：中转生图请求体改为 `stream=false`，并移除 `partial_images`。
+- `docs/ops-health-and-queues.md`：补充中转非流式返回说明。
+- `progress.md`：追加本轮修改记录。
+- 回滚方式：使用 Git 回退本轮涉及文件，或执行 `git restore services/high_res_image_relay_service.py docs/ops-health-and-queues.md progress.md`；如果已提交则用对应提交点执行 `git revert <commit>`。
+
+## 2026-06-16 - Task: 重构用户端画图页布局
+### What was done
+- 将用户端画图页重构为桌面双栏工作台：左侧常驻历史对话，右侧集中展示当前画布、生成结果和输入区。
+- 移动端保留历史弹窗入口，避免小屏被侧栏挤占。
+- 顶部状态区集中展示当前画布标题、额度和运行任务数，输入区固定在底部，降低核心操作寻找成本。
+- 为移动端历史按钮补充可访问名称。
+### Testing
+- `npm run build` in `web`
+- `docker build -t chatgpt2api-auth-local:dev .`
+- `docker run -d --name chatgpt2api-auth-local -p 8080:80 -e STORAGE_BACKEND=json -v "${PWD}\data:/app/data" -v "${PWD}\config.json:/app/config.json" chatgpt2api-auth-local:dev`
+- `Invoke-RestMethod -Uri http://localhost:8080/auth/login -Method Post -Headers @{Authorization='Bearer chatgpt2api'}` 返回 `ok=true`。
+- `Invoke-WebRequest -Uri http://localhost:8080/image -UseBasicParsing` 返回 `200`。
+- 使用 Chrome/Playwright 检查 `1440x900` 和 `390x844` 视口：画布标题、输入框可见；桌面左侧工作台可见；手机历史按钮可见；未发现主要按钮/输入区横向撑破。
+### Notes
+- `web/src/app/image/page.tsx`：重构画图页主布局，新增桌面左侧工作台和移动端顶部入口。
+- `progress.md`：追加本轮修改记录。
+- 回滚方式：使用 Git 回退本轮涉及文件，或执行 `git restore web/src/app/image/page.tsx progress.md`；如果已提交则用对应提交点执行 `git revert <commit>`。
+
+## 2026-06-16 - Task: 中转请求补充 resolution 参数
+### What was done
+- 2K/4K 中转请求在发送像素尺寸 `size` 的同时，补充发送 `resolution=2k/4k`。
+- 返回结果中补充 `target_resolution`，便于日志判断实际请求的清晰度。
+- 保留原有像素尺寸映射，兼容认 `size=3840x2160` 的中转接口。
+### Testing
+- `python -m py_compile services/high_res_image_relay_service.py`
+- `docker build -t chatgpt2api-auth-local:dev .`
+- `docker run -d --name chatgpt2api-auth-local -p 8080:80 -e STORAGE_BACKEND=json -v "${PWD}\data:/app/data" -v "${PWD}\config.json:/app/config.json" chatgpt2api-auth-local:dev`
+- `Invoke-RestMethod -Uri http://localhost:8080/auth/login -Method Post -Headers @{Authorization='Bearer chatgpt2api'}` 返回 `ok=true`。
+### Notes
+- `services/high_res_image_relay_service.py`：中转生图请求体补充 `resolution` 字段。
+- `docs/ops-health-and-queues.md`：补充中转高清参数兼容说明。
+- `progress.md`：追加本轮修改记录。
+- 回滚方式：使用 Git 回退本轮涉及文件，或执行 `git restore services/high_res_image_relay_service.py docs/ops-health-and-queues.md progress.md`；如果已提交则用对应提交点执行 `git revert <commit>`。
+
+## 2026-06-16 - Task: 优化画图页色彩与参数菜单定位
+### What was done
+- 调整画图页工作台、顶部状态区和输入区的色彩层级，减少页面整体单调感。
+- 修复张数、比例、清晰度菜单在桌面端脱离按钮、在移动端贴边溢出的问题。
+- 移动端底部参数栏由横向滚动改为自动换行，并为发送按钮预留固定空间，避免清晰度按钮和发送按钮互相压住。
+- 本地 Docker 镜像已重新构建并重建容器，当前仍通过 `http://localhost:8080` 访问。
+### Testing
+- `npm run build` in `web`
+- `docker build -t chatgpt2api-auth-local:dev .`
+- `docker run -d --name chatgpt2api-auth-local -p 8080:80 -e STORAGE_BACKEND=json -v "${PWD}\data:/app/data" -v "${PWD}\config.json:/app/config.json" chatgpt2api-auth-local:dev`
+- `Invoke-RestMethod -Uri http://localhost:8080/auth/login -Method Post -Headers @{Authorization='Bearer chatgpt2api'}` 返回 `ok=true`。
+- `Invoke-WebRequest -Uri http://localhost:8080/image -UseBasicParsing` 返回 `200`。
+- 使用浏览器检查 `1440x900` 和 `390x844` 视口：桌面无横向溢出；手机端张数、比例、清晰度三个菜单均在视口内；底部参数栏不再压住发送按钮。
+### Notes
+- `web/src/app/image/page.tsx`：调整画图页背景、侧栏、顶部状态区的色彩层级。
+- `web/src/app/image/components/image-composer.tsx`：调整输入区配色、参数按钮菜单定位和移动端换行布局。
+- `progress.md`：追加本轮修改记录。
+- 回滚方式：使用 Git 回退本轮涉及文件，或执行 `git restore web/src/app/image/page.tsx web/src/app/image/components/image-composer.tsx progress.md`；如果已提交则用对应提交点执行 `git revert <commit>`。
+
+## 2026-06-16 - Task: 收敛画图页视觉层级
+### What was done
+- 将画图页从多色渐变风格收敛为中性工作台风格，减少蓝绿黄堆叠造成的杂乱感。
+- 移除空状态中的彩色光斑背景和大标题，改为更轻的空画布提示。
+- 张数和清晰度上拉框改为桌面端按按钮中心展开，减少弹层偏移感。
+- 去掉主内容区域、侧栏和输入框外层的大投影，避免出现“卡片外又套阴影框”的视觉问题。
+- 本地 Docker 镜像已重新构建并重建容器，当前仍通过 `http://localhost:8080` 访问。
+### Testing
+- `npm run build` in `web`
+- `docker build -t chatgpt2api-auth-local:dev .`
+- `docker run -d --name chatgpt2api-auth-local -p 8080:80 -e STORAGE_BACKEND=json -v "${PWD}\data:/app/data" -v "${PWD}\config.json:/app/config.json" chatgpt2api-auth-local:dev`
+- `Invoke-RestMethod -Uri http://localhost:8080/auth/login -Method Post -Headers @{Authorization='Bearer chatgpt2api'}` 返回 `ok=true`。
+- `Invoke-WebRequest -Uri http://localhost:8080/image -UseBasicParsing` 返回 `200`。
+### Notes
+- `web/src/app/image/page.tsx`：收敛主页面配色，并移除主内容区和侧栏的大投影。
+- `web/src/app/image/components/image-composer.tsx`：收敛输入区配色、居中张数/清晰度弹层，并移除输入框外层大投影。
+- `web/src/app/image/components/image-results.tsx`：移除空状态彩色光斑和大标题，改为轻量空画布提示。
+- `progress.md`：追加本轮修改记录。
+- 回滚方式：使用 Git 回退本轮涉及文件，或执行 `git restore web/src/app/image/page.tsx web/src/app/image/components/image-composer.tsx web/src/app/image/components/image-results.tsx progress.md`；如果已提交则用对应提交点执行 `git revert <commit>`。
+
+## 2026-06-16 - Task: 移除画图页外层卡片壳
+### What was done
+- 将画图页外层背景改为满宽白底，不再露出全局网格背景。
+- 拆掉主内容区和侧栏的外层圆角卡片样式，改为侧边栏加内容区的工作台布局。
+- 保留左侧与右侧之间的细分隔线，避免页面完全失去结构。
+- 本地 Docker 镜像已重新构建并重建容器，当前仍通过 `http://localhost:8080` 访问。
+### Testing
+- `npm run build` in `web`
+- `docker build -t chatgpt2api-auth-local:dev .`
+- `docker run -d --name chatgpt2api-auth-local -p 8080:80 -e STORAGE_BACKEND=json -v "${PWD}\data:/app/data" -v "${PWD}\config.json:/app/config.json" chatgpt2api-auth-local:dev`
+- `Invoke-RestMethod -Uri http://localhost:8080/auth/login -Method Post -Headers @{Authorization='Bearer chatgpt2api'}` 返回 `ok=true`。
+- `Invoke-WebRequest -Uri http://localhost:8080/image -UseBasicParsing` 返回 `200`。
+### Notes
+- `web/src/app/image/page.tsx`：移除画图页外层灰底、圆角主卡片和侧栏卡片壳。
+- `progress.md`：追加本轮修改记录。
+- 回滚方式：使用 Git 回退本轮涉及文件，或执行 `git restore web/src/app/image/page.tsx progress.md`；如果已提交则用对应提交点执行 `git revert <commit>`。
+
+## 2026-06-16 - Task: 回滚画图页重构尝试
+### What was done
+- 按用户反馈撤回画图页重构尝试，恢复 `page.tsx`、`image-composer.tsx`、`image-results.tsx` 到仓库原有版本。
+- 保留其它非画图页 UI 的既有改动，不触碰本地配置文件。
+- 本地 Docker 镜像已重新构建并重建容器，当前仍通过 `http://localhost:8080` 访问。
+### Testing
+- `npm run build` in `web`
+- `docker build -t chatgpt2api-auth-local:dev .`
+- `docker run -d --name chatgpt2api-auth-local -p 8080:80 -e STORAGE_BACKEND=json -v "${PWD}\data:/app/data" -v "${PWD}\config.json:/app/config.json" chatgpt2api-auth-local:dev`
+- `Invoke-RestMethod -Uri http://localhost:8080/auth/login -Method Post -Headers @{Authorization='Bearer chatgpt2api'}` 返回 `ok=true`。
+- `Invoke-WebRequest -Uri http://localhost:8080/image -UseBasicParsing` 返回 `200`。
+- `git status --short -- web/src/app/image/page.tsx web/src/app/image/components/image-composer.tsx web/src/app/image/components/image-results.tsx` 无输出，确认三个 UI 文件已恢复干净。
+### Notes
+- `web/src/app/image/page.tsx`：恢复到仓库原有版本。
+- `web/src/app/image/components/image-composer.tsx`：恢复到仓库原有版本。
+- `web/src/app/image/components/image-results.tsx`：恢复到仓库原有版本。
+- `progress.md`：追加本轮回滚记录。
+- 回滚方式：本轮是回滚操作；如需再次恢复重构尝试，只能从当前对话记录或 Git 暂存/补丁重新应用相关 UI 改动。
+
+## 2026-06-16 - Task: 增加图片自动清理与友好失败提示
+### What was done
+- 服务启动时继续清理过期图片和失效缩略图，并新增后台每日自动清理，复用图片管理页手动清理的保留天数和保护规则。
+- 普通用户看到的生图失败提示增加归类：额度不足、账号池限流/额度耗尽、中转接口连接失败、代理连接异常、内容策略命中。
+- 前后端错误文案映射保持一致，避免浏览器端把后端友好文案重新改回泛化提示。
+- 本地 Docker 镜像已重新构建并重建容器，当前仍通过 `http://localhost:8080` 访问。
+### Testing
+- `python -m py_compile api/app.py services/image_service.py services/public_errors.py`
+- 使用 `services.public_errors.public_error_message` 样例验证中转、代理、账号池、额度、内容策略错误会映射到预期中文提示。
+- `npm run build` in `web`
+- `docker build -t chatgpt2api-auth-local:dev .`
+- `docker run -d --name chatgpt2api-auth-local -p 8080:80 -e STORAGE_BACKEND=json -v "${PWD}\data:/app/data" -v "${PWD}\config.json:/app/config.json" chatgpt2api-auth-local:dev`
+- `Invoke-RestMethod -Uri http://localhost:8080/auth/login -Method Post -Headers @{Authorization='Bearer chatgpt2api'}` 返回 `ok=true`。
+- `Invoke-WebRequest -Uri http://localhost:8080/image -UseBasicParsing` 返回 `200`。
+- `GET /api/images/storage` 返回当前存储统计与 `retention_days=15`。
+- `POST /api/images/cleanup` 返回 `removed_images=0`、`removed_thumbnails=0`，确认清理入口正常。
+### Notes
+- `api/app.py`：应用生命周期中启动图片自动清理线程，并使用完整清理函数处理缩略图。
+- `services/image_service.py`：新增每日图片清理后台线程，复用现有清理逻辑。
+- `services/public_errors.py`：增强后端公共错误文案归类。
+- `web/src/lib/public-error.ts`：同步前端公共错误文案归类。
+- `docs/ops-health-and-queues.md`：补充图片自动清理和失败提示归类说明。
+- `progress.md`：追加本轮修改记录。
+- 回滚方式：使用 Git 回退本轮涉及文件，或执行 `git restore api/app.py services/image_service.py services/public_errors.py web/src/lib/public-error.ts docs/ops-health-and-queues.md progress.md`；如果已提交则用对应提交点执行 `git revert <commit>`。
