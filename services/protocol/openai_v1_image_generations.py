@@ -31,6 +31,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         response_format=response_format,
         base_url=base_url,
         message_as_error=True,
+        retry_after_progress=not bool(body.get("stream")),
     ))
     if body.get("stream"):
         return stream_image_chunks(outputs)

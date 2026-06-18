@@ -91,6 +91,19 @@ def image_stream_error_message(message: str) -> str:
     return text or "image generation failed"
 
 
+def is_retryable_image_tool_arguments_message(message: str) -> bool:
+    text = str(message or "").strip()
+    if not text.startswith("{"):
+        return False
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    return "prompt" in data and "size" in data and "n" in data
+
+
 def encode_images(images: Iterable[tuple[bytes, str, str]]) -> list[str]:
     return [base64.b64encode(data).decode("ascii") for data, _, _ in images if data]
 
@@ -399,6 +412,7 @@ class ConversationRequest:
     response_format: str = "b64_json"
     base_url: str | None = None
     message_as_error: bool = False
+    retry_after_progress: bool = False
 
 
 @dataclass
@@ -1123,17 +1137,31 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                     "token": anonymize_token(token),
                 })
             except RuntimeError as exc:
-                if emitted:
+                if emitted and not request.retry_after_progress:
                     return
                 raise ImageGenerationError(str(exc) or "image generation failed") from exc
 
             emitted_for_token = False
             returned_message = False
             returned_result = False
+            retry_message_no_result = False
             try:
                 backend = OpenAIBackendAPI(access_token=token)
                 for output in stream_image_outputs(backend, request, index, request.n):
                     if output.kind == "message" and request.message_as_error:
+                        if request.retry_after_progress and is_retryable_image_tool_arguments_message(output.text):
+                            retry_message_no_result = True
+                            returned_message = True
+                            last_error = "upstream returned image tool arguments without image"
+                            logger.warning({
+                                "event": "image_account_tool_arguments_no_result",
+                                "model": request.model,
+                                "requested_resolution": request.resolution or "",
+                                "requested_size": request.size or "",
+                                "token": anonymize_token(token),
+                                "message_preview": str(output.text or "")[:200],
+                            })
+                            break
                         raise ImageGenerationError(
                             output.text or "Image generation was rejected by upstream policy.",
                             status_code=400,
@@ -1145,8 +1173,23 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                     returned_message = output.kind == "message"
                     returned_result = returned_result or output.kind == "result"
                     yield output
-                if returned_message or not returned_result:
+                if returned_message:
                     account_service.mark_image_result(token, False)
+                    if retry_message_no_result and request.retry_after_progress:
+                        continue
+                    return
+                if not returned_result:
+                    last_error = "image generation returned no image"
+                    logger.warning({
+                        "event": "image_account_no_result",
+                        "model": request.model,
+                        "requested_resolution": request.resolution or "",
+                        "requested_size": request.size or "",
+                        "token": anonymize_token(token),
+                    })
+                    account_service.mark_image_result(token, False)
+                    if request.retry_after_progress:
+                        continue
                     return
                 account_service.mark_image_result(token, True)
                 break

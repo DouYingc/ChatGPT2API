@@ -213,3 +213,67 @@
 - `docs/ops-health-and-queues.md`：补充图片自动清理和失败提示归类说明。
 - `progress.md`：追加本轮修改记录。
 - 回滚方式：使用 Git 回退本轮涉及文件，或执行 `git restore api/app.py services/image_service.py services/public_errors.py web/src/lib/public-error.ts docs/ops-health-and-queues.md progress.md`；如果已提交则用对应提交点执行 `git revert <commit>`。
+
+## 2026-06-19 - Task: 修复图片任务长期 running 并重建本地 Docker
+### What was done
+- 为已进入 `running` 的图片任务增加生命周期保护，超过 `image_poll_timeout_secs + 60` 秒未返回时自动标记失败并返还预扣额度。
+- 任务超时后如果后台请求迟到返回，不再覆盖已失败/已取消状态，避免前端重新被旧结果带偏。
+- 补充单测覆盖 running 超时和迟到结果忽略场景。
+- 本地 Docker 镜像已重新构建并重建容器，当前通过 `http://localhost:8080` 访问。
+### Testing
+- `python -m py_compile services/image_task_service.py`
+- `docker build -t chatgpt2api-auth-local:dev .`
+- `docker run -d --name chatgpt2api-auth-local -p 8080:80 -e STORAGE_BACKEND=json -v "${PWD}\data:/app/data" -v "${PWD}\config.json:/app/config.json" chatgpt2api-auth-local:dev`
+- `Invoke-WebRequest -UseBasicParsing -Uri http://localhost:8080/` 返回 `200`。
+- `Invoke-WebRequest -UseBasicParsing -Uri http://localhost:8080/auth/login -Method Post -Headers @{Authorization='Bearer chatgpt2api'}` 返回 `200`。
+- `docker exec -w /app chatgpt2api-auth-local uv run python -m unittest test.test_image_task_service` 通过，`Ran 5 tests`。
+### Notes
+- `services/image_task_service.py`：增加 running 任务超时失败、额度返还和迟到结果忽略逻辑。
+- `test/test_image_task_service.py`：增加 running 超时与迟到结果保护测试。
+- `docs/ops-health-and-queues.md`：补充图片任务 running 超时行为说明。
+- `progress.md`：追加本轮修改记录。
+- 回滚方式：使用 Git 回退本轮涉及文件，或执行 `git restore services/image_task_service.py test/test_image_task_service.py docs/ops-health-and-queues.md progress.md`；如果已提交则用对应提交点执行 `git revert <commit>`。
+
+## 2026-06-19 - Task: 优化账号池图片任务无结果重试
+### What was done
+- 排查 5 张并发图生图时 3 张快速成功、2 张长期卡住的问题，确认卡点在 ChatGPT 网页生图会话进入轮询后没有及时产出图片文件。
+- 非流式 1K 账号池图片任务遇到“只有进度但无图片结果”时，会标记当前账号失败并换下一个可用账号重试。
+- 将本地测试配置 `image_poll_timeout_secs` 从 240 秒调整为 90 秒，避免坏会话长时间占住界面。
+- 本地 Docker 镜像已重新构建并重建容器，当前通过 `http://localhost:8080` 访问。
+### Testing
+- `python -m py_compile services/protocol/conversation.py services/protocol/openai_v1_image_edit.py services/protocol/openai_v1_image_generations.py services/image_task_service.py`
+- `docker build -t chatgpt2api-auth-local:dev .`
+- `docker run -d --name chatgpt2api-auth-local -p 8080:80 -e STORAGE_BACKEND=json -v "${PWD}\data:/app/data" -v "${PWD}\config.json:/app/config.json" chatgpt2api-auth-local:dev`
+- `Invoke-WebRequest -UseBasicParsing -Uri http://localhost:8080/` 返回 `200`。
+- `Invoke-WebRequest -UseBasicParsing -Uri http://localhost:8080/auth/login -Method Post -Headers @{Authorization='Bearer chatgpt2api'}` 返回 `200`。
+- `docker exec -w /app chatgpt2api-auth-local uv run python -m unittest test.test_codex_image_route test.test_image_task_service` 通过，`Ran 9 tests`。
+- `docker exec -w /app chatgpt2api-auth-local uv run python -c "from services.config import config; print(config.image_poll_timeout_secs)"` 输出 `90`。
+### Notes
+- `services/protocol/conversation.py`：为非流式图片请求增加无图片结果后的换账号重试逻辑。
+- `services/protocol/openai_v1_image_edit.py`：图生图非流式任务启用进度后重试策略。
+- `services/protocol/openai_v1_image_generations.py`：文生图非流式任务启用进度后重试策略。
+- `config.json`：本地图片轮询超时调整为 90 秒。
+- `test/test_codex_image_route.py`：增加账号池无结果换账号测试，并隔离高分辨率路由配置。
+- `test/test_image_task_service.py`：放宽 running 超时测试窗口，适配 Docker 测试环境。
+- `docs/ops-health-and-queues.md`：补充账号池无结果重试与建议轮询时间。
+- `progress.md`：追加本轮修改记录。
+- 回滚方式：使用 Git 回退本轮涉及文件，或执行 `git restore services/protocol/conversation.py services/protocol/openai_v1_image_edit.py services/protocol/openai_v1_image_generations.py config.json test/test_codex_image_route.py test/test_image_task_service.py docs/ops-health-and-queues.md progress.md`；如果已提交则用对应提交点执行 `git revert <commit>`。
+
+## 2026-06-19 - Task: 识别生图工具参数文本并换账号重试
+### What was done
+- 排查 `{"prompt":null,"size":"1792x1024","n":1...}` 这类失败信息，确认它是上游返回的生图工具参数文本，不是额度或账号登录错误。
+- 非流式账号池图片任务遇到这类参数文本时，不再直接失败，而是标记当前账号失败并换下一个可用账号重试。
+- 本地 Docker 镜像已重新构建并重建容器，当前通过 `http://localhost:8080` 访问。
+### Testing
+- `python -m py_compile services/protocol/conversation.py`
+- `docker build -t chatgpt2api-auth-local:dev .`
+- `docker run -d --name chatgpt2api-auth-local -p 8080:80 -e STORAGE_BACKEND=json -v "${PWD}\data:/app/data" -v "${PWD}\config.json:/app/config.json" chatgpt2api-auth-local:dev`
+- `Invoke-WebRequest -UseBasicParsing -Uri http://localhost:8080/` 返回 `200`。
+- `Invoke-WebRequest -UseBasicParsing -Uri http://localhost:8080/auth/login -Method Post -Headers @{Authorization='Bearer chatgpt2api'}` 返回 `200`。
+- `docker exec -w /app chatgpt2api-auth-local uv run python -m unittest test.test_codex_image_route test.test_image_task_service` 通过，`Ran 10 tests`。
+### Notes
+- `services/protocol/conversation.py`：识别生图工具参数文本，并在非流式任务中换账号重试。
+- `test/test_codex_image_route.py`：增加参数文本无图片结果后换账号成功的测试。
+- `docs/ops-health-and-queues.md`：补充参数文本无图片结果的处理说明。
+- `progress.md`：追加本轮修改记录。
+- 回滚方式：使用 Git 回退本轮涉及文件，或执行 `git restore services/protocol/conversation.py test/test_codex_image_route.py docs/ops-health-and-queues.md progress.md`；如果已提交则用对应提交点执行 `git revert <commit>`。

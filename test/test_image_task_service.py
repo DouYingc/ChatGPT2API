@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import tempfile
 import time
 import unittest
@@ -26,12 +27,13 @@ def wait_for_task(service: ImageTaskService, identity: dict[str, object], task_i
 
 
 class ImageTaskServiceTests(unittest.TestCase):
-    def make_service(self, path: Path, handler=None) -> ImageTaskService:
+    def make_service(self, path: Path, handler=None, running_timeout_getter=None) -> ImageTaskService:
         return ImageTaskService(
             path,
             generation_handler=handler or (lambda _payload: {"data": [{"url": "http://example.test/image.png"}]}),
             edit_handler=handler or (lambda _payload: {"data": [{"url": "http://example.test/edit.png"}]}),
             retention_days_getter=lambda: 30,
+            running_timeout_getter=running_timeout_getter,
         )
 
     def test_duplicate_submit_uses_existing_task(self):
@@ -145,6 +147,43 @@ class ImageTaskServiceTests(unittest.TestCase):
 
             self.assertEqual([item["status"] for item in result["items"]], ["error", "error"])
             self.assertTrue(all("已中断" in item.get("error", "") for item in result["items"]))
+
+    def test_running_task_expires_and_late_result_is_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            release = threading.Event()
+
+            def handler(_payload):
+                release.wait(timeout=2)
+                return {"data": [{"url": "http://example.test/late.png"}]}
+
+            service = self.make_service(
+                Path(tmp_dir) / "image_tasks.json",
+                handler,
+                running_timeout_getter=lambda: 1.0,
+            )
+            service.submit_generation(
+                OWNER,
+                client_task_id="stale-running",
+                prompt="cat",
+                model="gpt-image-2",
+                size=None,
+                base_url="http://local.test",
+            )
+            wait_for_task(service, OWNER, "stale-running", "running")
+
+            try:
+                time.sleep(1.1)
+                expired = service.list_tasks(OWNER, ["stale-running"])["items"][0]
+                self.assertEqual(expired["status"], "error")
+                self.assertIn("未返回结果", expired.get("error", ""))
+
+                release.set()
+                time.sleep(0.1)
+                after_late_return = service.list_tasks(OWNER, ["stale-running"])["items"][0]
+                self.assertEqual(after_late_return["status"], "error")
+                self.assertEqual(after_late_return.get("data"), [])
+            finally:
+                release.set()
 
 
 if __name__ == "__main__":
