@@ -70,6 +70,41 @@ class ImageTaskServiceTests(unittest.TestCase):
             self.assertEqual(task["data"][0]["url"], "http://example.test/image.png")
             self.assertEqual(calls, 1)
 
+    def test_task_reports_progress_elapsed_and_duration(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            progress_seen = threading.Event()
+            release = threading.Event()
+
+            def handler(payload):
+                callback = payload.get("progress_callback")
+                self.assertTrue(callable(callback))
+                callback("image_stream_resolve_start")
+                progress_seen.set()
+                release.wait(timeout=2)
+                callback("receiving_image")
+                return {"data": [{"url": "http://example.test/progress.png"}]}
+
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json", handler)
+            service.submit_generation(
+                OWNER,
+                client_task_id="progress-task",
+                prompt="cat",
+                model="gpt-image-2",
+                size=None,
+                base_url="http://local.test",
+            )
+
+            self.assertTrue(progress_seen.wait(timeout=2))
+            running = service.list_tasks(OWNER, ["progress-task"])["items"][0]
+            self.assertEqual(running["status"], "running")
+            self.assertEqual(running["progress"], "image_stream_resolve_start")
+            self.assertIsInstance(running.get("elapsed_secs"), (int, float))
+
+            release.set()
+            task = wait_for_task(service, OWNER, "progress-task", "success")
+            self.assertEqual(task["data"][0]["url"], "http://example.test/progress.png")
+            self.assertIsInstance(task.get("duration_ms"), int)
+
     def test_different_owner_cannot_query_task(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = self.make_service(Path(tmp_dir) / "image_tasks.json")

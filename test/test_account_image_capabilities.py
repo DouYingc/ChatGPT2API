@@ -10,6 +10,7 @@ os.environ.setdefault("CHATGPT2API_AUTH_KEY", "test-auth")
 
 from services.account_service import AccountService
 from services.auth_service import AuthService
+from services.config import config
 from services.cpa_service import _account_payload_from_auth_file
 from services.sub2api_service import _account_payload_from_remote
 from services.storage.json_storage import JSONStorageBackend
@@ -218,6 +219,57 @@ class AccountCapabilityTests(unittest.TestCase):
             self.assertGreaterEqual(reset_at, before + timedelta(seconds=60))
             self.assertLessEqual(reset_at, after + timedelta(seconds=60))
             self.assertFalse(AccountService._is_image_account_available(updated))
+
+    def test_parallel_image_slots_use_configured_account_concurrency(self) -> None:
+        original_concurrency = config.data.get("image_account_concurrency")
+        try:
+            for concurrency in range(1, 9):
+                with self.subTest(concurrency=concurrency):
+                    config.data["image_account_concurrency"] = concurrency
+                    with tempfile.TemporaryDirectory() as tmp_dir:
+                        service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+                        tokens = [f"token-{index}" for index in range(concurrency)]
+                        service.add_account_items([
+                            {"access_token": token, "quota": 10, "status": "正常"}
+                            for token in tokens
+                        ])
+
+                        selected = [
+                            service._acquire_next_candidate_token()
+                            for _ in range(concurrency)
+                        ]
+
+                        self.assertEqual(len(set(selected)), concurrency)
+                        self.assertEqual(set(selected), set(tokens))
+        finally:
+            if original_concurrency is None:
+                config.data.pop("image_account_concurrency", None)
+            else:
+                config.data["image_account_concurrency"] = original_concurrency
+
+    def test_image_slot_selection_prefers_idle_account_before_reuse(self) -> None:
+        original_concurrency = config.data.get("image_account_concurrency")
+        config.data["image_account_concurrency"] = 5
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+                service.add_account_items([
+                    {"access_token": "busy-token", "quota": 10, "status": "正常"},
+                    {"access_token": "idle-token-1", "quota": 10, "status": "正常"},
+                    {"access_token": "idle-token-2", "quota": 10, "status": "正常"},
+                ])
+                service._image_inflight["busy-token"] = 1
+
+                selected = service._acquire_next_candidate_token()
+
+                self.assertNotEqual(selected, "busy-token")
+                self.assertEqual(service._image_inflight[selected], 1)
+                self.assertEqual(service._image_inflight["busy-token"], 1)
+        finally:
+            if original_concurrency is None:
+                config.data.pop("image_account_concurrency", None)
+            else:
+                config.data["image_account_concurrency"] = original_concurrency
 
 
 class TokenLogTests(unittest.TestCase):

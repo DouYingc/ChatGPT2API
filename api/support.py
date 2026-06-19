@@ -271,6 +271,14 @@ def sanitize_sub2api_servers(servers: list[dict]) -> list[dict]:
 def start_limited_account_watcher(stop_event: Event) -> Thread:
     interval_seconds = config.refresh_account_interval_minute * 60
 
+    def maybe_start_quota_registration() -> None:
+        try:
+            from services.register_service import register_service
+
+            register_service.start_if_quota_below_target("account-watcher")
+        except Exception as exc:
+            print(f"[account-watcher] auto-register check fail {exc}")
+
     def worker() -> None:
         while not stop_event.is_set():
             try:
@@ -278,6 +286,7 @@ def start_limited_account_watcher(stop_event: Event) -> Thread:
                 if limited_tokens:
                     print(f"[account-limited-watcher] checking {len(limited_tokens)} limited accounts")
                     account_service.refresh_accounts(limited_tokens)
+                maybe_start_quota_registration()
             except Exception as exc:
                 print(f"[account-limited-watcher] fail {exc}")
             stop_event.wait(interval_seconds)

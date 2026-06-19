@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from api.image_inputs import parse_image_edit_request, read_image_sources
 from api.support import (
     apply_image_account_policy,
     client_ip_from_request,
@@ -14,7 +16,8 @@ from api.support import (
     resolve_image_base_url,
 )
 from services.config import config
-from services.content_filter import check_request, request_text
+from services.content_filter import check_request, request_shape, request_text
+from services.editable_file_task_service import editable_file_task_service
 from services.image_owners_service import record_owner_for_result
 from services.image_prompts_service import record_prompt_for_result
 from services.log_service import LoggedCall
@@ -27,6 +30,7 @@ from services.protocol import (
     openai_v1_image_generations,
     openai_v1_models,
     openai_v1_response,
+    openai_search,
 )
 
 
@@ -36,6 +40,7 @@ class ImageGenerationRequest(BaseModel):
     n: int = Field(default=1, ge=1, le=4)
     size: str | None = None
     resolution: str | None = None
+    quality: str = "auto"
     response_format: str = "b64_json"
     history_disabled: bool = True
     stream: bool | None = None
@@ -66,6 +71,16 @@ class AnthropicMessageRequest(BaseModel):
     messages: list[dict[str, object]] | None = None
     system: object | None = None
     stream: bool | None = None
+
+
+class SearchRequest(BaseModel):
+    prompt: str = Field(..., min_length=1)
+
+
+class EditableFileTaskRequest(BaseModel):
+    prompt: str = ""
+    base64_images: list[str] = Field(default_factory=list)
+    client_task_id: str | None = None
 
 
 async def filter_or_log(call: LoggedCall, text: str) -> None:
@@ -123,14 +138,14 @@ def create_router() -> APIRouter:
         payload = body.model_dump(mode="python")
         apply_image_account_policy(identity, payload)
         _enforce_image_ip_limit(identity, request)
-        # /v1 入口按 n * 分辨率倍率扣：1K/默认=1，2K=2，4K=3。
-        n = max(1, int(body.n or 1))
+        n = max(1, int(payload.get("n") or 1))
         quota_cost = image_quota_cost_for_payload(payload, count=n)
         payload["base_url"] = resolve_image_base_url(request)
-        # 上游真失败时把入口扣的额度退回去——LoggedCall.run / stream 内部失败分支会自动回调。
-        # 这里 capture identity，failure_refund_amount 跟入口扣的金额一致。
         call = LoggedCall(
-            identity, "/v1/images/generations", body.model, "文生图",
+            identity,
+            "/v1/images/generations",
+            str(payload.get("model") or body.model),
+            "文生图",
             request_text=body.prompt,
             on_failure=lambda amount: refund_user_quota(identity, amount),
             failure_refund_amount=quota_cost,
@@ -139,7 +154,6 @@ def create_router() -> APIRouter:
         await filter_or_log(call, body.prompt)
         consume_user_quota(identity, quota_cost)
         result = await call.run(openai_v1_image_generations.handle, payload)
-        # 对接 dict 返回时把图片归属也写一下；StreamingResponse 不动。
         if isinstance(result, dict):
             record_owner_for_result(identity, result.get("data"))
             record_prompt_for_result(body.prompt, result.get("data"))
@@ -149,61 +163,39 @@ def create_router() -> APIRouter:
     async def edit_images(
             request: Request,
             authorization: str | None = Header(default=None),
-            image: list[UploadFile] | None = File(default=None),
-            image_list: list[UploadFile] | None = File(default=None, alias="image[]"),
-            prompt: str = Form(...),
-            model: str = Form(default="gpt-image-2"),
-            n: int = Form(default=1),
-            size: str | None = Form(default=None),
-            resolution: str | None = Form(default=None),
-            response_format: str = Form(default="b64_json"),
-            stream: bool | None = Form(default=None),
     ):
         identity = require_identity(authorization)
-        if n < 1 or n > 4:
-            raise HTTPException(status_code=400, detail={"error": "n must be between 1 and 4"})
-        payload = {
-            "prompt": prompt,
-            "model": model,
-            "n": n,
-            "size": size,
-            "resolution": resolution,
-            "response_format": response_format,
-            "stream": stream,
-        }
+        payload, image_sources = await parse_image_edit_request(request)
+        prompt = str(payload["prompt"])
+        model = str(payload["model"])
         apply_image_account_policy(identity, payload)
         _enforce_image_ip_limit(identity, request)
-        # 同样按 n * 分辨率倍率扣，校验过 n 范围之后再扣，避免无效请求也被记账。
-        effective_n = max(1, int(n))
-        quota_cost = image_quota_cost_for_payload(payload, count=effective_n)
+        n = max(1, int(payload.get("n") or 1))
+        quota_cost = image_quota_cost_for_payload(payload, count=n)
         call = LoggedCall(
-            identity, "/v1/images/edits", model, "图生图",
+            identity,
+            "/v1/images/edits",
+            str(payload.get("model") or model),
+            "图生图",
             request_text=prompt,
             on_failure=lambda amount: refund_user_quota(identity, amount),
             failure_refund_amount=quota_cost,
-            metadata=_image_log_metadata(payload, count=effective_n, quota_cost=quota_cost),
+            metadata=_image_log_metadata(payload, count=n, quota_cost=quota_cost),
         )
         await filter_or_log(call, prompt)
         consume_user_quota(identity, quota_cost)
-        uploads = [*(image or []), *(image_list or [])]
-        if not uploads:
-            # 已扣的退掉——参数错误本质是 fail-fast，不该让用户白扣
+        try:
+            payload["images"] = await read_image_sources(image_sources)
+        except HTTPException:
+            refund_user_quota(identity, quota_cost)
+            raise
+        if not payload["images"]:
             refund_user_quota(identity, quota_cost)
             raise HTTPException(status_code=400, detail={"error": "image file is required"})
-        images: list[tuple[bytes, str, str]] = []
-        for upload in uploads:
-            image_data = await upload.read()
-            if not image_data:
-                refund_user_quota(identity, quota_cost)
-                raise HTTPException(status_code=400, detail={"error": "image file is empty"})
-            images.append((image_data, upload.filename or "image.png", upload.content_type or "image/png"))
-        payload["images"] = images
         payload["base_url"] = resolve_image_base_url(request)
         result = await call.run(openai_v1_image_edit.handle, payload)
         if isinstance(result, dict):
             record_owner_for_result(identity, result.get("data"))
-            # 图生图：标 is_edit=True，画廊发布时会把 prompt 强制落空，
-            # 因为离开参考图后这段修改指令对其它用户毫无复用价值。
             record_prompt_for_result(prompt, result.get("data"), is_edit=True)
         return result
 
@@ -213,7 +205,14 @@ def create_router() -> APIRouter:
         payload = body.model_dump(mode="python")
         model = str(payload.get("model") or "auto")
         request_preview = request_text(payload.get("prompt"), payload.get("messages"))
-        call = LoggedCall(identity, "/v1/chat/completions", model, "文本生成", request_text=request_preview)
+        call = LoggedCall(
+            identity,
+            "/v1/chat/completions",
+            model,
+            "文本生成",
+            request_text=request_preview,
+            request_shape=request_shape(payload.get("messages")),
+        )
         await filter_or_log(call, request_preview)
         return await call.run(openai_v1_chat_complete.handle, payload)
 
@@ -223,7 +222,14 @@ def create_router() -> APIRouter:
         payload = body.model_dump(mode="python")
         model = str(payload.get("model") or "auto")
         request_preview = request_text(payload.get("input"), payload.get("instructions"))
-        call = LoggedCall(identity, "/v1/responses", model, "Responses", request_text=request_preview)
+        call = LoggedCall(
+            identity,
+            "/v1/responses",
+            model,
+            "Responses",
+            request_text=request_preview,
+            request_shape=request_shape(payload.get("input")),
+        )
         await filter_or_log(call, request_preview)
         return await call.run(openai_v1_response.handle, payload)
 
@@ -241,5 +247,52 @@ def create_router() -> APIRouter:
         call = LoggedCall(identity, "/v1/messages", model, "Messages", request_text=request_preview)
         await filter_or_log(call, request_preview)
         return await call.run(anthropic_v1_messages.handle, payload, sse="anthropic")
+
+    @router.post("/v1/search")
+    async def search(body: SearchRequest, authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        call = LoggedCall(identity, "/v1/search", openai_search.MODEL, "搜索", request_text=body.prompt)
+        await filter_or_log(call, body.prompt)
+        return await call.run(openai_search.handle, body.model_dump(mode="python"))
+
+    @router.get("/v1/editable-file-tasks")
+    async def list_editable_file_tasks(ids: str = "", authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        task_ids = [item.strip() for item in ids.split(",") if item.strip()]
+        return await run_in_threadpool(editable_file_task_service.list_tasks, identity, task_ids)
+
+    @router.get("/files/{file_path:path}")
+    async def download_editable_file(file_path: str):
+        try:
+            path = await run_in_threadpool(editable_file_task_service.public_file_path, file_path)
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail={"error": "file not found"}) from exc
+        return FileResponse(path, filename=path.name)
+
+    @router.post("/v1/ppt/generations")
+    async def create_ppt_task(body: EditableFileTaskRequest, request: Request, authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        await filter_or_log(LoggedCall(identity, "/v1/ppt/generations", "gpt-5-5-thinking", "PPT生成任务", request_text=body.prompt), body.prompt)
+        return await run_in_threadpool(
+            editable_file_task_service.submit_ppt,
+            identity,
+            client_task_id=body.client_task_id or "",
+            prompt=body.prompt,
+            base64_images=body.base64_images,
+            base_url=resolve_image_base_url(request),
+        )
+
+    @router.post("/v1/psd/generations")
+    async def create_psd_task(body: EditableFileTaskRequest, request: Request, authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        await filter_or_log(LoggedCall(identity, "/v1/psd/generations", "gpt-5-5-thinking", "PSD生成任务", request_text=body.prompt), body.prompt)
+        return await run_in_threadpool(
+            editable_file_task_service.submit_psd,
+            identity,
+            client_task_id=body.client_task_id or "",
+            prompt=body.prompt,
+            base64_images=body.base64_images,
+            base_url=resolve_image_base_url(request),
+        )
 
     return router

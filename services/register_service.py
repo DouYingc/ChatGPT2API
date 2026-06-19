@@ -115,6 +115,35 @@ class RegisterService:
             self._save()
             return self.get()
 
+    def start_if_quota_below_target(self, source: str = "") -> dict:
+        with self._lock:
+            cfg = self.get()
+            mode = str(cfg.get("mode") or "")
+            if mode not in {"quota", "available"}:
+                return cfg
+            if self._runner and self._runner.is_alive():
+                return cfg
+            metrics = self._pool_metrics()
+            self._config["stats"].update(metrics)
+            self._config["stats"]["updated_at"] = _now()
+            self._save()
+            if mode == "available":
+                target = int(cfg.get("target_available") or 1)
+                reached = metrics["current_available"] >= target
+                label = f"current_available={metrics['current_available']}, target_available={target}"
+            else:
+                target = int(cfg.get("target_quota") or 1)
+                reached = metrics["current_quota"] >= target
+                label = f"current_quota={metrics['current_quota']}, target_quota={target}"
+            if reached:
+                self._append_log(f"Auto pool check: {label}, skip registration", "yellow")
+                return self.get()
+            self._append_log(
+                f"Auto pool check: {label}, start registration" + (f", source={source}" if source else ""),
+                "yellow",
+            )
+        return self.start()
+
     def repair_abnormal_accounts(self) -> dict:
         with self._lock:
             if self._runner and self._runner.is_alive():
@@ -198,11 +227,13 @@ class RegisterService:
             futures = set()
             while True:
                 cfg = self.get()
-                while self.get()["enabled"] and not self._target_reached(cfg, submitted) and len(futures) < threads:
+                target_reached = self._target_reached(cfg, submitted)
+                while self.get()["enabled"] and not target_reached and len(futures) < threads:
                     submitted += 1
                     futures.add(executor.submit(openai_register.worker, submitted))
+                    target_reached = self._target_reached(cfg, submitted)
                 self._bump(running=len(futures), done=done, success=success, fail=fail)
-                if not futures and (not self.get()["enabled"] or str(cfg.get("mode") or "total") == "total"):
+                if not futures and (not self.get()["enabled"] or target_reached):
                     break
                 if not futures:
                     time.sleep(max(1, int(cfg.get("check_interval") or 5)))

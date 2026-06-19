@@ -29,6 +29,16 @@ DEFAULT_BACKUP_INCLUDE = {
     "images": False,
 }
 
+DEFAULT_IMAGE_STORAGE = {
+    "enabled": False,
+    "mode": "local",
+    "webdav_url": "",
+    "webdav_username": "",
+    "webdav_password": "",
+    "webdav_root_path": "chatgpt2api/images",
+    "public_base_url": "",
+}
+
 DEFAULT_REGISTER_QUOTAS = {
     "image_daily_quota": 0,
     "image_daily_unlimited": True,
@@ -167,6 +177,35 @@ def _normalize_backup_state(value: object) -> dict[str, object]:
     }
 
 
+def _normalize_image_storage_settings(value: object) -> dict[str, object]:
+    source = value if isinstance(value, dict) else {}
+    mode = str(source.get("mode") or "local").strip().lower()
+    if mode not in {"local", "webdav", "both"}:
+        mode = "local"
+    enabled = _normalize_bool(source.get("enabled"), False)
+    if not enabled:
+        mode = "local"
+    root_path = str(source.get("webdav_root_path") or DEFAULT_IMAGE_STORAGE["webdav_root_path"]).strip().strip("/")
+    return {
+        "enabled": enabled,
+        "mode": mode,
+        "webdav_url": str(source.get("webdav_url") or "").strip().rstrip("/"),
+        "webdav_username": str(source.get("webdav_username") or "").strip(),
+        "webdav_password": str(source.get("webdav_password") or "").strip(),
+        "webdav_root_path": root_path or str(DEFAULT_IMAGE_STORAGE["webdav_root_path"]),
+        "public_base_url": str(source.get("public_base_url") or "").strip().rstrip("/"),
+    }
+
+
+def _validate_image_storage_settings(settings: dict[str, object]) -> None:
+    if not _normalize_bool(settings.get("enabled"), False):
+        return
+    if not str(settings.get("webdav_url") or "").strip():
+        raise ValueError("启用 WebDAV 图片存储后必须填写 WebDAV URL")
+    if not str(settings.get("webdav_password") or "").strip():
+        raise ValueError("启用 WebDAV 图片存储后必须填写 WebDAV 密码")
+
+
 @dataclass(frozen=True)
 class LoadedSettings:
     auth_key: str
@@ -286,11 +325,32 @@ class ConfigStore:
             return 120
 
     @property
+    def image_poll_interval_secs(self) -> float:
+        try:
+            return max(0.5, float(self.data.get("image_poll_interval_secs", 10.0)))
+        except (TypeError, ValueError):
+            return 10.0
+
+    @property
+    def image_poll_initial_wait_secs(self) -> float:
+        try:
+            return max(0.0, float(self.data.get("image_poll_initial_wait_secs", 10.0)))
+        except (TypeError, ValueError):
+            return 10.0
+
+    @property
     def image_account_concurrency(self) -> int:
         try:
             return max(1, int(self.data.get("image_account_concurrency", 3)))
         except (TypeError, ValueError):
             return 3
+
+    @property
+    def image_parallel_generation(self) -> bool:
+        value = self.data.get("image_parallel_generation", True)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
 
     @property
     def high_res_image_concurrency(self) -> int:
@@ -346,6 +406,27 @@ class ConfigStore:
         if normalized == "2k":
             return self.image_route_2k
         return self.image_route_1k
+
+    @property
+    def image_settle_enabled(self) -> bool:
+        value = self.data.get("image_settle_enabled", True)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    @property
+    def image_check_before_hit_enabled(self) -> bool:
+        value = self.data.get("image_check_before_hit_enabled", True)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    @property
+    def image_settle_secs(self) -> float:
+        try:
+            return max(0.5, float(self.data.get("image_settle_secs", 2.0)))
+        except (TypeError, ValueError):
+            return 2.0
 
     @property
     def auto_remove_invalid_accounts(self) -> bool:
@@ -475,7 +556,10 @@ class ConfigStore:
         data["cleanup_protect_gallery"] = self.cleanup_protect_gallery
         data["cleanup_protect_user_images"] = self.cleanup_protect_user_images
         data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
+        data["image_poll_interval_secs"] = self.image_poll_interval_secs
+        data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
         data["image_account_concurrency"] = self.image_account_concurrency
+        data["image_parallel_generation"] = self.image_parallel_generation
         data["high_res_image_concurrency"] = self.high_res_image_concurrency
         data["register_ip_daily_limit"] = self.register_ip_daily_limit
         data["image_ip_minute_limit"] = self.image_ip_minute_limit
@@ -492,6 +576,7 @@ class ConfigStore:
         data["register_defaults"] = self.register_defaults
         data["global_system_prompt"] = self.global_system_prompt
         data["backup"] = self.get_backup_settings()
+        data["image_storage"] = self.get_image_storage_settings()
         data.pop("auth-key", None)
         return data
 
@@ -503,6 +588,9 @@ class ConfigStore:
         next_data.update(dict(data or {}))
         if "backup" in next_data:
             next_data["backup"] = _normalize_backup_settings(next_data.get("backup"))
+        if "image_storage" in next_data:
+            next_data["image_storage"] = _normalize_image_storage_settings(next_data.get("image_storage"))
+            _validate_image_storage_settings(next_data["image_storage"])
         if "register_defaults" in next_data:
             next_data["register_defaults"] = _normalize_register_defaults(next_data.get("register_defaults"))
         next_data["image_route_1k"] = _normalize_image_route(next_data.get("image_route_1k"), DEFAULT_IMAGE_ROUTES["1k"])
@@ -515,6 +603,9 @@ class ConfigStore:
 
     def get_backup_settings(self) -> dict[str, object]:
         return _normalize_backup_settings(self.data.get("backup"))
+
+    def get_image_storage_settings(self) -> dict[str, object]:
+        return _normalize_image_storage_settings(self.data.get("image_storage"))
 
     def get_storage_backend(self) -> StorageBackend:
         """获取存储后端实例（单例）"""

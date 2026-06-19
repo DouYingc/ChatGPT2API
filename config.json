@@ -2,7 +2,7 @@
   "auth-key": "chatgpt2api",
   "refresh_account_interval_minute": 60,
   "image_retention_days": 15,
-  "image_poll_timeout_secs": 120,
+  "image_poll_timeout_secs": 180,
   "auto_remove_rate_limited_accounts": false,
   "auto_remove_invalid_accounts": true,
   "log_levels": [
@@ -38,12 +38,38 @@
       "register": true,
       "cpa": true,
       "sub2api": true,
+      "high_res_relays": true,
       "logs": true,
       "image_tasks": true,
       "accounts_snapshot": true,
       "auth_keys_snapshot": true,
+      "chat_conversations_snapshot": true,
       "images": false
     }
   },
-  "image_account_concurrency": 3
+  "image_account_concurrency": 5,
+  "cleanup_protect_gallery": true,
+  "cleanup_protect_user_images": true,
+  "register_ip_daily_limit": 3,
+  "image_ip_minute_limit": 10,
+  "high_res_relay_fail_threshold": 3,
+  "high_res_relay_cooldown_seconds": 300,
+  "image_route_1k": "pool",
+  "image_route_2k": "relay",
+  "image_route_4k": "relay",
+  "register_defaults": {
+    "image_daily_quota": 0,
+    "image_daily_unlimited": true,
+    "image_monthly_quota": 0,
+    "image_monthly_unlimited": true,
+    "image_total_quota": 1000,
+    "image_total_unlimited": false,
+    "chat_daily_quota": 0,
+    "chat_daily_unlimited": true,
+    "chat_monthly_quota": 0,
+    "chat_monthly_unlimited": true,
+    "chat_total_quota": 0,
+    "chat_total_unlimited": true
+  },
+  "high_res_image_concurrency": 3
 }

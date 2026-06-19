@@ -190,51 +190,65 @@ async function buildReferenceImageFromStoredImage(image: StoredImage, fileName: 
 }
 
 function taskDataToStoredImage(image: StoredImage, task: ImageTask): StoredImage {
+  const sameImageState = (next: StoredImage) =>
+    image.taskId === next.taskId &&
+    image.status === next.status &&
+    image.b64_json === next.b64_json &&
+    image.url === next.url &&
+    image.revised_prompt === next.revised_prompt &&
+    image.error === next.error;
+
+  const withStableIdentity = (next: StoredImage) => (sameImageState(next) ? image : next);
+
   if (task.status === "success") {
     const first = task.data?.[0];
     if (!first?.b64_json && !first?.url) {
-      return {
+      return withStableIdentity({
         ...image,
         taskId: task.id,
         status: "error",
         error: "未返回图片数据",
-      };
+      });
     }
-    return {
+    const url = first.url;
+    return withStableIdentity({
       ...image,
       taskId: task.id,
       status: "success",
-      b64_json: first.b64_json,
-      url: first.url,
+      b64_json: url ? undefined : first.b64_json,
+      url,
       revised_prompt: first.revised_prompt,
       error: undefined,
-    };
+    });
   }
 
   if (task.status === "error") {
-    return {
+    return withStableIdentity({
       ...image,
       taskId: task.id,
       status: "error",
+      b64_json: undefined,
       error: task.error || "生成失败",
-    };
+    });
   }
 
   if (task.status === "canceled") {
-    return {
+    return withStableIdentity({
       ...image,
       taskId: task.id,
       status: "error",
+      b64_json: undefined,
       error: task.error || "已取消",
-    };
+    });
   }
 
-  return {
+  return withStableIdentity({
     ...image,
     taskId: task.id,
     status: "loading",
+    b64_json: undefined,
     error: undefined,
-  };
+  });
 }
 
 function sleep(ms: number) {
@@ -453,6 +467,7 @@ function ImagePageContent({ isAdmin, storageScope }: { isAdmin: boolean; storage
   // 底部渐隐条只在"内容超出视口且没滚到底"时显示——
   // 没有内容、刚好填满、或者已经滚到底，都不应该看到那块灰雾。
   const [showBottomFade, setShowBottomFade] = useState(false);
+  const showBottomFadeRef = useRef(false);
   // 当用户在错误卡片上点击"回复"时记录的上下文，仅 UI 展示 + 提交时拼装 API prompt 用，
   // 不会进入 turn.prompt 也不会进入聊天可见列表，所以用户视野里永远只有自己说过的话。
   const [replyTarget, setReplyTarget] = useState<{
@@ -540,6 +555,14 @@ function ImagePageContent({ isAdmin, storageScope }: { isAdmin: boolean; storage
           : deleteConfirm?.type === "one"
             ? "确认删除这条图片对话吗？删除后无法恢复。"
             : "";
+
+  const updateShowBottomFade = useCallback((nextVisible: boolean) => {
+    if (showBottomFadeRef.current === nextVisible) {
+      return;
+    }
+    showBottomFadeRef.current = nextVisible;
+    setShowBottomFade(nextVisible);
+  }, []);
 
   useEffect(() => {
     conversationsRef.current = conversations;
@@ -816,7 +839,7 @@ function ImagePageContent({ isAdmin, storageScope }: { isAdmin: boolean; storage
       restoredConversationIdRef.current = null;
       lastTurnCountRef.current = 0;
       lastActiveCountRef.current = 0;
-      setShowBottomFade(false);
+      updateShowBottomFade(false);
       return;
     }
 
@@ -853,11 +876,11 @@ function ImagePageContent({ isAdmin, storageScope }: { isAdmin: boolean; storage
     // 内容变化时同步重算渐隐：滚动事件不会因 turn 增减自动触发，
     // 必须在 layout 阶段亲自量一次，否则新增内容被 composer 遮住时灰雾不会出现。
     const remaining = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
-    setShowBottomFade(remaining > 8);
+    updateShowBottomFade(remaining > 8);
 
     lastTurnCountRef.current = turnsLength;
     lastActiveCountRef.current = activeCount;
-  }, [selectedConversation]);
+  }, [selectedConversation, updateShowBottomFade]);
 
   // 切走会话时立即把当前滚动位置落盘，避免下次回来还没来得及保存
   useEffect(() => {
@@ -965,6 +988,9 @@ function ImagePageContent({ isAdmin, storageScope }: { isAdmin: boolean; storage
         return;
       }
       const nextConversation = updater(current);
+      if (nextConversation === current) {
+        return;
+      }
       const nextConversations = sortImageConversations([
         nextConversation,
         ...conversationsRef.current.filter((item) => item.id !== conversationId),
@@ -1101,23 +1127,23 @@ function ImagePageContent({ isAdmin, storageScope }: { isAdmin: boolean; storage
     }
   };
 
-  const openDeleteConversationConfirm = (id: string) => {
+  const openDeleteConversationConfirm = useCallback((id: string) => {
     setIsHistoryOpen(false);
     setDeleteConfirm({ type: "one", id });
-  };
+  }, []);
 
-  const openDeletePromptConfirm = (conversationId: string, turnId: string) => {
+  const openDeletePromptConfirm = useCallback((conversationId: string, turnId: string) => {
     setDeleteConfirm({ type: "prompt", conversationId, turnId });
-  };
+  }, []);
 
-  const openDeleteResultsConfirm = (conversationId: string, turnId: string) => {
+  const openDeleteResultsConfirm = useCallback((conversationId: string, turnId: string) => {
     setDeleteConfirm({ type: "results", conversationId, turnId });
-  };
+  }, []);
 
-  const openClearHistoryConfirm = () => {
+  const openClearHistoryConfirm = useCallback(() => {
     setIsHistoryOpen(false);
     setDeleteConfirm({ type: "all" });
-  };
+  }, []);
 
   const handleConfirmDelete = async () => {
     const target = deleteConfirm;
@@ -1403,6 +1429,7 @@ function ImagePageContent({ isAdmin, storageScope }: { isAdmin: boolean; storage
         const taskMap = new Map(tasks.map((task) => [task.id, task]));
         await updateConversation(conversationId, (current) => {
           const conversation = current ?? snapshot;
+          let conversationChanged = false;
           const turns = conversation.turns.map((turn) => {
             if (turn.id !== activeTurn.id) {
               return turn;
@@ -1410,15 +1437,24 @@ function ImagePageContent({ isAdmin, storageScope }: { isAdmin: boolean; storage
             const images = turn.images.map((image) => {
               const taskId = image.taskId || image.id;
               const task = taskMap.get(taskId);
-              return task ? taskDataToStoredImage({ ...image, taskId }, task) : image;
+              const currentImage = image.taskId === taskId ? image : { ...image, taskId };
+              return task ? taskDataToStoredImage(currentImage, task) : currentImage;
             });
             const derived = deriveTurnStatus({ ...turn, status: "generating", images });
+            const imagesChanged = images.some((image, index) => image !== turn.images[index]);
+            if (!imagesChanged && derived.status === turn.status && derived.error === turn.error) {
+              return turn;
+            }
+            conversationChanged = true;
             return {
               ...turn,
               ...derived,
               images,
             };
           });
+          if (!conversationChanged) {
+            return conversation;
+          }
           return {
             ...conversation,
             updatedAt: new Date().toISOString(),
@@ -1829,7 +1865,7 @@ function ImagePageContent({ isAdmin, storageScope }: { isAdmin: boolean; storage
               // 同步底部渐隐：剩余可滚距离大于一行高度时才显示，
               // 滚到底/没溢出都让它消失，避免无内容时灰雾常驻。
               const remaining = target.scrollHeight - target.scrollTop - target.clientHeight;
-              setShowBottomFade(remaining > 8);
+              updateShowBottomFade(remaining > 8);
               const conversationId = restoredConversationIdRef.current;
               if (!conversationId) return;
               scrollPositionsRef.current[conversationId] = target.scrollTop;

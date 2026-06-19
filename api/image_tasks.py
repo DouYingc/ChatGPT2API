@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, File, Form, Header, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
+from api.image_inputs import parse_image_edit_request, read_image_sources
 from api.support import (
     apply_image_account_policy,
     client_ip_from_request,
@@ -27,10 +28,15 @@ class ImageGenerationTaskRequest(BaseModel):
     model: str = "gpt-image-2"
     size: str | None = None
     resolution: str | None = None
+    quality: str = "auto"
 
 
 class ImageTaskCancelRequest(BaseModel):
     ids: list[str] = Field(default_factory=list)
+
+
+class ResumePollRequest(BaseModel):
+    extra_timeout_secs: float = Field(default=30.0, ge=5.0, le=120.0)
 
 
 def _parse_task_ids(value: str) -> list[str]:
@@ -101,17 +107,14 @@ def create_router() -> APIRouter:
         payload: dict[str, object] = {"model": body.model, "resolution": body.resolution}
         apply_image_account_policy(identity, payload)
         _enforce_image_ip_limit(identity, request)
-        # 前端每张图独立提交一次任务，按分辨率倍率扣；额度不足直接 402，
-        # 不要等 submit_generation 跑完才发现没额度。
         quota_cost = image_quota_cost_for_payload(payload)
         consume_user_quota(identity, quota_cost)
-        # 后续任意 fail-fast 路径都要把预扣额度退掉，避免参数错误也白扣
         try:
             await filter_or_log(
                 LoggedCall(
                     identity,
                     "/api/image-tasks/generations",
-                    body.model,
+                    str(payload.get("model") or body.model),
                     "文生图任务",
                     request_text=body.prompt,
                     metadata=_image_log_metadata(payload, size=body.size, quota_cost=quota_cost),
@@ -128,6 +131,7 @@ def create_router() -> APIRouter:
                 resolution=str(payload.get("resolution") or body.resolution or "") or None,
                 plan_type=str(payload.get("plan_type") or "").strip() or None,
                 allowed_plan_types=payload.get("allowed_plan_types"),
+                quality=body.quality,
                 base_url=resolve_image_base_url(request),
                 quota_cost=quota_cost,
             )
@@ -135,9 +139,6 @@ def create_router() -> APIRouter:
             refund_user_quota(identity, quota_cost)
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
         except HTTPException:
-            # filter_or_log / submit_generation 抛出的 HTTPException：
-            # 内容审查 / 上游号池忙 / 参数错都属于"还没真发请求就失败"，应退款。
-            # _run_task 异步路径的失败由 image_task_service._refund_one 自己退，不在这条链路里。
             refund_user_quota(identity, quota_cost)
             raise
 
@@ -145,52 +146,45 @@ def create_router() -> APIRouter:
     async def create_edit_task(
         request: Request,
         authorization: str | None = Header(default=None),
-        image: list[UploadFile] | None = File(default=None),
-        image_list: list[UploadFile] | None = File(default=None, alias="image[]"),
-        client_task_id: str = Form(...),
-        prompt: str = Form(...),
-        model: str = Form(default="gpt-image-2"),
-        size: str | None = Form(default=None),
-        resolution: str | None = Form(default=None),
     ):
         identity = require_identity(authorization)
-        payload: dict[str, object] = {"model": model, "resolution": resolution}
-        apply_image_account_policy(identity, payload)
+        payload, image_sources = await parse_image_edit_request(request)
+        client_task_id = str(payload.get("client_task_id") or "").strip()
+        if not client_task_id:
+            raise HTTPException(status_code=400, detail={"error": "client_task_id is required"})
+        prompt = str(payload["prompt"])
+        model = str(payload["model"])
+        policy_payload: dict[str, object] = {"model": model, "resolution": payload.get("resolution")}
+        apply_image_account_policy(identity, policy_payload)
         _enforce_image_ip_limit(identity, request)
-        # 同样按分辨率倍率扣；前端会拆成多次提交，所以这里不需要乘以 n。
-        quota_cost = image_quota_cost_for_payload(payload)
+        quota_cost = image_quota_cost_for_payload(policy_payload)
         consume_user_quota(identity, quota_cost)
         try:
             await filter_or_log(
                 LoggedCall(
                     identity,
                     "/api/image-tasks/edits",
-                    model,
+                    str(policy_payload.get("model") or model),
                     "图生图任务",
                     request_text=prompt,
-                    metadata=_image_log_metadata(payload, size=size, quota_cost=quota_cost),
+                    metadata=_image_log_metadata(policy_payload, size=payload["size"], quota_cost=quota_cost),
                 ),
                 prompt,
             )
-            uploads = [*(image or []), *(image_list or [])]
-            if not uploads:
+            images = await read_image_sources(image_sources)
+            if not images:
                 raise HTTPException(status_code=400, detail={"error": "image file is required"})
-            images: list[tuple[bytes, str, str]] = []
-            for upload in uploads:
-                image_data = await upload.read()
-                if not image_data:
-                    raise HTTPException(status_code=400, detail={"error": "image file is empty"})
-                images.append((image_data, upload.filename or "image.png", upload.content_type or "image/png"))
             return await run_in_threadpool(
                 image_task_service.submit_edit,
                 identity,
                 client_task_id=client_task_id,
                 prompt=prompt,
-                model=str(payload.get("model") or model),
-                size=size,
-                resolution=str(payload.get("resolution") or resolution or "") or None,
-                plan_type=str(payload.get("plan_type") or "").strip() or None,
-                allowed_plan_types=payload.get("allowed_plan_types"),
+                model=str(policy_payload.get("model") or model),
+                size=payload["size"],
+                resolution=str(policy_payload.get("resolution") or payload.get("resolution") or "") or None,
+                plan_type=str(policy_payload.get("plan_type") or "").strip() or None,
+                allowed_plan_types=policy_payload.get("allowed_plan_types"),
+                quality=payload["quality"],
                 base_url=resolve_image_base_url(request),
                 images=images,
                 quota_cost=quota_cost,
@@ -201,5 +195,23 @@ def create_router() -> APIRouter:
         except HTTPException:
             refund_user_quota(identity, quota_cost)
             raise
+
+    @router.post("/api/image-tasks/{task_id}/resume-poll")
+    async def resume_image_poll(
+        task_id: str,
+        body: ResumePollRequest,
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ):
+        identity = require_identity(authorization)
+        try:
+            return await run_in_threadpool(
+                image_task_service.resume_poll,
+                identity,
+                task_id,
+                body.extra_timeout_secs,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 
     return router

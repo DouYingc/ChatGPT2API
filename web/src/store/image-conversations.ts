@@ -94,6 +94,7 @@ function normalizeStoredImage(image: StoredImage): StoredImage {
     ...image,
     taskId: typeof image.taskId === "string" && image.taskId ? image.taskId : undefined,
     url: typeof image.url === "string" && image.url ? image.url : undefined,
+    b64_json: typeof image.url === "string" && image.url ? undefined : image.b64_json,
     revised_prompt: typeof image.revised_prompt === "string" ? image.revised_prompt : undefined,
   };
   if (image.status === "loading" || image.status === "error" || image.status === "success") {

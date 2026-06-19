@@ -100,14 +100,32 @@ def _public_task(task: dict[str, Any], *, sanitize_errors: bool = False) -> dict
         "model": task.get("model"),
         "size": task.get("size"),
         "resolution": task.get("resolution"),
+        "quality": task.get("quality"),
         "created_at": task.get("created_at"),
         "updated_at": task.get("updated_at"),
     }
+    if task.get("conversation_id"):
+        item["conversation_id"] = task.get("conversation_id")
     if task.get("data") is not None:
         item["data"] = task.get("data")
+    if task.get("usage") is not None:
+        item["usage"] = task.get("usage")
     error = _public_error(task, sanitize_errors=sanitize_errors)
     if error:
         item["error"] = error
+    if task.get("progress"):
+        item["progress"] = task.get("progress")
+    if task.get("duration_ms") is not None:
+        item["duration_ms"] = task.get("duration_ms")
+    if task.get("status") in (TASK_STATUS_RUNNING, TASK_STATUS_QUEUED):
+        if task.get("status") == TASK_STATUS_RUNNING:
+            # RUNNING 状态仅在 started_ts 被设置后（image_stream_resolve_start）才计时
+            base_ts = task.get("started_ts")
+        else:
+            # QUEUED 状态从 created_ts 开始计时（排队等待中）
+            base_ts = task.get("created_ts") or task.get("updated_ts")
+        if base_ts:
+            item["elapsed_secs"] = round(time.time() - base_ts, 1)
     return item
 
 
@@ -177,10 +195,11 @@ class ImageTaskService:
         prompt: str,
         model: str,
         size: str | None,
-        base_url: str,
         resolution: str | None = None,
         plan_type: str | None = None,
         allowed_plan_types: object = None,
+        quality: str = "auto",
+        base_url: str = "",
         quota_cost: int = 1,
     ) -> dict[str, Any]:
         payload = {
@@ -191,6 +210,7 @@ class ImageTaskService:
             "resolution": resolution,
             "plan_type": plan_type,
             "allowed_plan_types": allowed_plan_types,
+            "quality": quality,
             "response_format": "url",
             "base_url": base_url,
             "quota_cost": _quota_cost(quota_cost),
@@ -205,22 +225,24 @@ class ImageTaskService:
         prompt: str,
         model: str,
         size: str | None,
-        base_url: str,
-        images: list[tuple[bytes, str, str]],
         resolution: str | None = None,
         plan_type: str | None = None,
         allowed_plan_types: object = None,
+        quality: str = "auto",
+        base_url: str = "",
+        images: list[tuple[bytes, str, str]] | None = None,
         quota_cost: int = 1,
     ) -> dict[str, Any]:
         payload = {
             "prompt": prompt,
-            "images": images,
+            "images": images or [],
             "model": model,
             "n": 1,
             "size": size,
             "resolution": resolution,
             "plan_type": plan_type,
             "allowed_plan_types": allowed_plan_types,
+            "quality": quality,
             "response_format": "url",
             "base_url": base_url,
             "quota_cost": _quota_cost(quota_cost),
@@ -258,15 +280,6 @@ class ImageTaskService:
         return {"items": items, "missing_ids": missing_ids}
 
     def cancel_tasks(self, identity: dict[str, object], task_ids: list[str]) -> dict[str, Any]:
-        """标记任务为已取消。
-
-        - queued: 直接置为 canceled，工作线程启动时会发现并跳过实际请求
-        - running: 置为 canceled，工作线程会在请求结束后丢弃结果而不写入
-        - 终态(success/error/canceled): 不动
-
-        每条真正被取消（queued / running 翻 canceled）的任务都退还入口预扣额度。
-        终态条目不退——success 已经出图了不能扣回去，error/canceled 已经退过了。
-        """
         owner = _owner_id(identity)
         requested_ids = [_clean(task_id) for task_id in task_ids if _clean(task_id)]
         canceled: list[str] = []
@@ -286,21 +299,16 @@ class ImageTaskService:
                 task["status"] = TASK_STATUS_CANCELED
                 task["error"] = "已取消"
                 task["updated_at"] = _now_iso()
+                task["updated_ts"] = time.time()
                 canceled.append(task_id)
                 refund_amounts.append(_quota_cost(task.get("quota_cost")))
             if canceled:
                 self._save_locked()
-        # 退款放到锁外做：DataStore / DB 写盘期间不持有 self._lock，
-        # 避免与 _run_task 失败分支同时拿锁形成竞态。
         for amount in refund_amounts:
             self._refund_one(identity, amount)
         return {"canceled": canceled, "skipped": skipped, "missing_ids": missing_ids}
 
     def _refund_one(self, identity: dict[str, object], amount: int = 1) -> None:
-        """退还入口预扣额度。
-        admin / unlimited / 匿名身份内部 noop；普通用户的 used 回退对应额度且不会跌破 0。
-        所有异常吞掉——退款失败不该影响主流程的错误响应。
-        """
         role = str(identity.get("role") or "").strip().lower()
         item_id = str(identity.get("id") or "").strip()
         if role == "admin":
@@ -312,9 +320,8 @@ class ImageTaskService:
         if not item_id or item_id == "admin":
             return
         try:
-            # 延迟 import 避免 services 间循环引用
             from services.auth_service import auth_service
-            auth_service.refund_quota(item_id, _quota_cost(amount))
+            auth_service.refund_image_quota(item_id, _quota_cost(amount))
         except Exception:
             pass
 
@@ -353,9 +360,11 @@ class ImageTaskService:
                     "model": _clean(payload.get("model"), "gpt-image-2"),
                     "size": _clean(payload.get("size")),
                     "resolution": _clean(payload.get("resolution")),
+                    "quality": _clean(payload.get("quality"), "auto"),
                     "quota_cost": _quota_cost(payload.get("quota_cost")),
                     "created_at": now,
                     "updated_at": now,
+                    "created_ts": time.time(),
                 }
                 self._tasks[key] = task
                 self._save_locked()
@@ -386,8 +395,6 @@ class ImageTaskService:
         acquired_high_res_slot = False
         started = time.time()
         try:
-            # 启动前检查：若任务已被取消，直接结束。2K/4K 在拿到总并发槽位前保持 queued，
-            # 避免用户同时提交多张高清图时一起撞上游。
             with self._lock:
                 task = self._tasks.get(key)
                 if task is None or task.get("status") == TASK_STATUS_CANCELED:
@@ -402,9 +409,19 @@ class ImageTaskService:
                         return
 
             self._update_task(key, status=TASK_STATUS_RUNNING, error="")
+
+            def progress_callback(step: str) -> None:
+                with self._lock:
+                    task = self._tasks.get(key)
+                    if task is None or task.get("status") == TASK_STATUS_CANCELED:
+                        return
+                if step == "image_stream_resolve_start":
+                    self._update_task(key, started_ts=time.time())
+                self._update_task(key, progress=step)
+
+            payload_with_progress = {**payload, "progress_callback": progress_callback}
             handler = self.edit_handler if mode == "edit" else self.generation_handler
-            result = handler(payload)
-            # 请求结束后再检查：若期间被取消，丢弃结果不写回
+            result = handler(payload_with_progress)
             with self._lock:
                 task = self._tasks.get(key)
                 if task is None or task.get("status") != TASK_STATUS_RUNNING:
@@ -412,19 +429,22 @@ class ImageTaskService:
             if not isinstance(result, dict):
                 raise RuntimeError("image task returned streaming result unexpectedly")
             data = result.get("data")
+            account_email = _clean(result.get("_account_email") or result.get("account_email"))
             if not isinstance(data, list) or not data:
-                message = _clean(result.get("message")) or "image task returned no image data"
-                raise RuntimeError(message)
-            self._update_task(key, status=TASK_STATUS_SUCCESS, data=data, error="")
-            # 任务真正成功后再写归属表，避免给失败的临时落盘也挂上 owner。
-            # admin / 匿名身份不写，由 record_owner_for_result 内部判断。
+                upstream = _clean(result.get("message"))
+                if upstream:
+                    message = upstream
+                else:
+                    message = "号池中没有可用账号或所有账号均被限流，请检查号池状态（账号额度、是否被封禁、是否到达生图上限）"
+                error = RuntimeError(message)
+                if account_email:
+                    setattr(error, "account_email", account_email)
+                raise error
+            usage = result.get("usage")
+            duration_ms = int((time.time() - started) * 1000)
+            self._update_task(key, status=TASK_STATUS_SUCCESS, data=data, usage=usage, error="", duration_ms=duration_ms)
             record_owner_for_result(identity, data)
-            # prompt 文本同步写一份，给"我的作品"页 / 画廊发布功能复用。
-            # mode=="edit" 时标记为图生图，画廊发布时会自动把 prompt 落空——
-            # 图生图的 prompt 是相对参考图的指令，离开参考图对外人没复用价值。
-            record_prompt_for_result(
-                payload.get("prompt"), data, is_edit=(mode == "edit")
-            )
+            record_prompt_for_result(payload.get("prompt"), data, is_edit=(mode == "edit"))
             self._log_call(
                 identity,
                 mode,
@@ -436,17 +456,20 @@ class ImageTaskService:
                 resolution=_clean(payload.get("resolution")),
                 quota_cost=_quota_cost(payload.get("quota_cost")),
                 urls=_collect_image_urls(data),
+                account_email=account_email,
             )
         except Exception as exc:
-            # 请求异常时也要让"已取消"优先，不要把取消覆盖成 error
             with self._lock:
                 task = self._tasks.get(key)
                 if task is None or task.get("status") != TASK_STATUS_RUNNING:
                     return
             error_message = str(exc) or "image task failed"
-            self._update_task(key, status=TASK_STATUS_ERROR, error=error_message, data=[])
-            # 上游真失败：退还入口预扣额度。
-            # admin / unlimited 在 _refund_one 内部 noop；普通用户的 used 回退对应额度且不会跌破 0。
+            account_email = _clean(getattr(exc, "account_email", ""))
+            conversation_id = _clean(getattr(exc, "conversation_id", ""))
+            duration_ms = int((time.time() - started) * 1000)
+            self._update_task(key, status=TASK_STATUS_ERROR, error=error_message, data=[],
+                              duration_ms=duration_ms,
+                              **({"conversation_id": conversation_id} if conversation_id else {}))
             self._refund_one(identity, _quota_cost(payload.get("quota_cost")))
             self._log_call(
                 identity,
@@ -460,6 +483,7 @@ class ImageTaskService:
                 quota_cost=_quota_cost(payload.get("quota_cost")),
                 status="failed",
                 error=error_message,
+                account_email=account_email,
             )
         finally:
             if acquired_high_res_slot:
@@ -512,6 +536,7 @@ class ImageTaskService:
         status: str = "success",
         error: str = "",
         urls: list[str] | None = None,
+        account_email: str = "",
     ) -> None:
         endpoint = "/v1/images/edits" if mode == "edit" else "/v1/images/generations"
         summary_prefix = "图生图" if mode == "edit" else "文生图"
@@ -536,6 +561,8 @@ class ImageTaskService:
         detail["image_route"] = config.image_route_for_resolution(resolution or "1k")
         if error:
             detail["error"] = error
+        if account_email:
+            detail["account_email"] = account_email
         if urls:
             detail["urls"] = list(dict.fromkeys(urls))
         try:
@@ -550,6 +577,7 @@ class ImageTaskService:
                 return
             task.update(updates)
             task["updated_at"] = _now_iso()
+            task["updated_ts"] = time.time()
             self._save_locked()
 
     def _load_locked(self) -> dict[str, dict[str, Any]]:
@@ -581,16 +609,30 @@ class ImageTaskService:
                 "model": _clean(item.get("model"), "gpt-image-2"),
                 "size": _clean(item.get("size")),
                 "resolution": _clean(item.get("resolution")),
+                "quality": _clean(item.get("quality"), "auto"),
                 "quota_cost": _quota_cost(item.get("quota_cost")),
                 "created_at": _clean(item.get("created_at"), _now_iso()),
                 "updated_at": _clean(item.get("updated_at"), _clean(item.get("created_at"), _now_iso())),
+                "created_ts": item.get("created_ts"),
+                "updated_ts": item.get("updated_ts"),
+                "started_ts": item.get("started_ts"),
+                "duration_ms": item.get("duration_ms"),
             }
             data = item.get("data")
             if isinstance(data, list):
                 task["data"] = data
+            usage = item.get("usage")
+            if isinstance(usage, dict):
+                task["usage"] = usage
             error = _clean(item.get("error"))
             if error:
                 task["error"] = error
+            progress = _clean(item.get("progress"))
+            if progress:
+                task["progress"] = progress
+            conversation_id = _clean(item.get("conversation_id"))
+            if conversation_id:
+                task["conversation_id"] = conversation_id
             tasks[_task_key(owner, task_id)] = task
         return tasks
 
@@ -607,6 +649,7 @@ class ImageTaskService:
                 task["status"] = TASK_STATUS_ERROR
                 task["error"] = "服务已重启，未完成的图片任务已中断"
                 task["updated_at"] = _now_iso()
+                task["updated_ts"] = time.time()
                 changed = True
         return changed
 
@@ -630,6 +673,7 @@ class ImageTaskService:
             task["error"] = f"任务运行超过 {int(timeout_secs)} 秒未返回结果，请重试"
             task["data"] = []
             task["updated_at"] = _now_iso()
+            task["updated_ts"] = time.time()
             refunds.append((_clean(task.get("owner_id")), _quota_cost(task.get("quota_cost"))))
         return refunds
 
@@ -647,6 +691,113 @@ class ImageTaskService:
         for key in removed_keys:
             self._tasks.pop(key, None)
         return bool(removed_keys)
+
+    def resume_poll(
+        self,
+        identity: dict[str, object],
+        task_id: str,
+        extra_timeout_secs: float = 30.0,
+    ) -> dict[str, Any]:
+        """恢复对已超时任务的轮询，额外等待 extra_timeout_secs 秒。"""
+        owner = _owner_id(identity)
+        key = _task_key(owner, _clean(task_id))
+        with self._lock:
+            task = self._tasks.get(key)
+            if task is None:
+                raise ValueError("task not found")
+            if task.get("status") != TASK_STATUS_ERROR:
+                raise ValueError("task is not in error state")
+            error_msg = _clean(task.get("error"))
+            if "超时" not in error_msg:
+                raise ValueError("task error is not a timeout error")
+            conversation_id = _clean(task.get("conversation_id"))
+            if not conversation_id:
+                raise ValueError("task has no conversation_id")
+            mode = task.get("mode", "generate")
+            model = task.get("model", "gpt-image-2")
+            # 将任务状态重置为 running
+            self._update_task(key, status=TASK_STATUS_RUNNING, error="")
+
+        # 启动新线程继续轮询
+        thread = threading.Thread(
+            target=self._run_resume_poll,
+            args=(key, conversation_id, extra_timeout_secs, dict(identity), mode, model),
+            name=f"image-resume-{_clean(task_id)[:16]}",
+            daemon=True,
+        )
+        thread.start()
+        return _public_task(task)
+
+    def _run_resume_poll(
+        self,
+        key: str,
+        conversation_id: str,
+        extra_timeout_secs: float,
+        identity: dict[str, object],
+        mode: str,
+        model: str,
+    ) -> None:
+        """后台线程：继续轮询已有 conversation_id 的图片结果。"""
+        started = time.time()
+        try:
+            from services.openai_backend_api import OpenAIBackendAPI
+            from services.protocol.conversation import format_image_result
+
+            backend = OpenAIBackendAPI()
+            file_ids, sediment_ids = backend._poll_image_results(
+                conversation_id,
+                extra_timeout_secs,
+            )
+            if not file_ids and not sediment_ids:
+                raise RuntimeError(
+                    f"继续等待 {extra_timeout_secs} 秒后仍未找到图片结果。"
+                )
+
+            image_urls = backend.resolve_conversation_image_urls(
+                conversation_id, file_ids, sediment_ids, poll=False,
+            )
+            if not image_urls:
+                raise RuntimeError("图片 URL 解析失败")
+
+            image_items = [
+                {"b64_json": __import__("base64").b64encode(image_data).decode("ascii")}
+                for image_data in backend.download_image_bytes(image_urls)
+            ]
+            # 获取 task 的原始 prompt（从 _public_task 的 mode 判断）
+            with self._lock:
+                task = self._tasks.get(key)
+                quality = _clean(task.get("quality"), "auto") if task else "auto"
+                size = _clean(task.get("size")) if task else None
+            data = format_image_result(
+                image_items,
+                "",  # prompt 已不重要，结果已经拿到了
+                "b64_json",
+                "",
+                int(time.time()),
+            )["data"]
+            self._update_task(key, status=TASK_STATUS_SUCCESS, data=data, error="", duration_ms=int((time.time() - started) * 1000))
+            self._log_call(
+                identity,
+                mode,
+                model,
+                started,
+                "调用完成（续轮询）",
+                status="success",
+                urls=_collect_image_urls(data),
+            )
+        except Exception as exc:
+            error_message = str(exc) or "resume poll failed"
+            duration_ms = int((time.time() - started) * 1000)
+            self._update_task(key, status=TASK_STATUS_ERROR, error=error_message, data=[], duration_ms=duration_ms)
+            self._log_call(
+                identity,
+                mode,
+                model,
+                started,
+                "调用失败（续轮询）",
+                status="failed",
+                error=error_message,
+            )
 
 
 image_task_service = ImageTaskService(DATA_DIR / "image_tasks.json")

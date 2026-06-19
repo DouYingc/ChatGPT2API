@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { memo, useMemo, useState } from "react";
 import {
   AlertCircle,
   Check,
@@ -58,10 +58,13 @@ type ImageResultsProps = {
 };
 
 function getStoredImageSrc(image: StoredImage) {
+  if (image.url) {
+    return image.url;
+  }
   if (image.b64_json) {
     return `data:image/png;base64,${image.b64_json}`;
   }
-  return image.url || "";
+  return "";
 }
 
 // 单独识别"额度不足"这一类错误。这种错误不应该让用户去点"重试"或者"回复"——
@@ -176,7 +179,7 @@ function ErrorMessageBlock({ message }: { message: string }) {
   );
 }
 
-export function ImageResults({
+function ImageResultsComponent({
   selectedConversation,
   onOpenLightbox,
   onContinueEdit,
@@ -191,6 +194,32 @@ export function ImageResults({
   formatConversationTime,
 }: ImageResultsProps) {
   const [imageDimensions, setImageDimensions] = useState<Record<string, string>>({});
+
+  const allSuccessfulImages: ImageLightboxItem[] = useMemo(() => {
+    if (!selectedConversation) {
+      return [];
+    }
+
+    return selectedConversation.turns.flatMap((turn) =>
+      turn.images.flatMap((image) => {
+        const src = image.status === "success" ? getStoredImageSrc(image) : "";
+        if (!src) return [];
+        return [
+          {
+            id: image.id,
+            src,
+            sizeLabel: image.b64_json ? formatBase64ImageSize(image.b64_json) : undefined,
+            dimensions: imageDimensions[image.id],
+          },
+        ];
+      }),
+    );
+  }, [imageDimensions, selectedConversation]);
+
+  const successfulImageIndexById = useMemo(
+    () => new Map(allSuccessfulImages.map((image, index) => [image.id, index])),
+    [allSuccessfulImages],
+  );
 
   const updateImageDimensions = (id: string, width: number, height: number) => {
     const dimensions = formatImageDimensions(width, height);
@@ -309,23 +338,6 @@ export function ImageResults({
     );
   }
 
-  // 整段对话里所有「成功生成」的图（按 turn 顺序）。
-  // 灯箱的左侧缩略图带就走这份列表，参考图（用户上传）不计入。
-  const allSuccessfulImages: ImageLightboxItem[] = selectedConversation.turns.flatMap((turn) =>
-    turn.images.flatMap((image) => {
-      const src = image.status === "success" ? getStoredImageSrc(image) : "";
-      if (!src) return [];
-      return [
-        {
-          id: image.id,
-          src,
-          sizeLabel: image.b64_json ? formatBase64ImageSize(image.b64_json) : undefined,
-          dimensions: imageDimensions[image.id],
-        },
-      ];
-    }),
-  );
-
   return (
     <div className="mx-auto flex w-full max-w-[980px] flex-col gap-5 sm:gap-8">
       {selectedConversation.turns.map((turn, turnIndex) => {
@@ -424,7 +436,7 @@ export function ImageResults({
                       {turn.images.map((image, index) => {
                         const imageSrc = image.status === "success" ? getStoredImageSrc(image) : "";
                         if (image.status === "success" && imageSrc) {
-                          const currentIndex = allSuccessfulImages.findIndex((item) => item.id === image.id);
+                          const currentIndex = successfulImageIndexById.get(image.id) ?? 0;
                           const sizeLabel = image.b64_json ? formatBase64ImageSize(image.b64_json) : "";
                           const dimensions = imageDimensions[image.id];
                           const imageMeta = [sizeLabel, dimensions].filter(Boolean).join(" · ");
@@ -696,6 +708,9 @@ export function ImageResults({
     </div>
   );
 }
+
+export const ImageResults = memo(ImageResultsComponent);
+ImageResults.displayName = "ImageResults";
 
 function getTurnStatusLabel(status: ImageTurnStatus) {
   if (status === "queued") {

@@ -294,6 +294,20 @@ class AccountService:
                     )
                 tokens = self._list_available_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types)
                 if tokens:
+                    idle_tokens = [
+                        token
+                        for token in tokens
+                        if int(self._image_inflight.get(token, 0)) == 0
+                    ]
+                    if idle_tokens:
+                        tokens = idle_tokens
+                    else:
+                        min_inflight = min(int(self._image_inflight.get(token, 0)) for token in tokens)
+                        tokens = [
+                            token
+                            for token in tokens
+                            if int(self._image_inflight.get(token, 0)) == min_inflight
+                        ]
                     access_token = tokens[self._index % len(tokens)]
                     self._index += 1
                     self._image_inflight[access_token] = int(self._image_inflight.get(access_token, 0)) + 1
